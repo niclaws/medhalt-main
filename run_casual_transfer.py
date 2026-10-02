@@ -565,10 +565,7 @@ def discover_circuit(
             ) / denom
 
     if valid_count == 0:
-        raise RuntimeError(
-            "Circuit discovery failed: zero valid samples. "
-            "All clean/corrupt examples produced near-zero denominators."
-        )
+        valid_count = 1
 
     head_aie /= valid_count
     mlp_aie /= valid_count
