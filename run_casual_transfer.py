@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 from datetime import datetime
 import os
 import re
@@ -48,6 +49,23 @@ class MedHALTPairBuilder:
             tokens = self.tokenizer.encode(cleaned, add_special_tokens=False)
         return tokens[0] if len(tokens) > 0 else None
 
+    def encode_url_token(self, value: str) -> Optional[int]:
+        """
+        Encode the first token of a value that directly follows a URL slash.
+        Unlike normal answer tokens, do NOT prepend a space.
+        """
+        cleaned = str(value).strip()
+
+        if not cleaned:
+            return None
+
+        tokens = self.tokenizer.encode(
+            cleaned,
+            add_special_tokens=False
+        )
+
+        return tokens[0] if tokens else None
+
     def create_pair(self, clean_txt: str, corrupt_txt: str, target_str: str, halluc_str: str) -> Optional[Dict]:
         t_id = self.encode_single_token(target_str)
         h_id = self.encode_single_token(halluc_str)
@@ -82,6 +100,183 @@ class MedHALTPairBuilder:
         print(f"[PairBuilder] Retrieved {len(raw_samples)} raw samples from MedHALT.", datetime.now())
         pairs = []
 
+        if task_name in {"pmid2title", "title2pub"}:
+
+            real_samples = [
+                s for s in raw_samples
+                if str(s.get("pubmed_data_type", "")).lower() == "real_data"
+                   and str(s.get("is_paper_exists", "")).lower() == "yes"
+                   and pd.notna(s.get("PMID"))
+                   and pd.notna(s.get("Title"))
+                   and str(s.get("Title", "")).strip()
+            ]
+
+            print(
+                f"[PairBuilder] Found {len(real_samples)} usable real PubMed records.",
+                datetime.now()
+            )
+
+            # ================================================================
+            # PMID -> Title
+            # ================================================================
+            if task_name == "pmid2title":
+
+                for i in range(len(real_samples)):
+
+                    if len(pairs) >= n_samples:
+                        break
+
+                    clean_sample = real_samples[i]
+
+                    clean_pmid = str(clean_sample["PMID"]).strip()
+                    clean_title = str(clean_sample["Title"]).strip()
+
+                    if not clean_title:
+                        continue
+
+                    target_word = clean_title.split()[0]
+
+                    # Search for another paper whose first title token differs.
+                    for j in range(i + 1, len(real_samples)):
+
+                        corrupt_sample = real_samples[j]
+
+                        corrupt_pmid = str(corrupt_sample["PMID"]).strip()
+                        corrupt_title = str(corrupt_sample["Title"]).strip()
+
+                        if not corrupt_title:
+                            continue
+
+                        halluc_word = corrupt_title.split()[0]
+
+                        target_id = self.encode_single_token(target_word)
+                        halluc_id = self.encode_single_token(halluc_word)
+
+                        if target_id is None or halluc_id is None:
+                            continue
+
+                        if target_id == halluc_id:
+                            continue
+
+                        clean = (
+                            f"Provide the title of PubMed paper with PMID "
+                            f"{clean_pmid}:\nTitle:"
+                        )
+
+                        corrupt = (
+                            f"Provide the title of PubMed paper with PMID "
+                            f"{corrupt_pmid}:\nTitle:"
+                        )
+
+                        pair = self.create_pair(
+                            clean,
+                            corrupt,
+                            target_word,
+                            halluc_word
+                        )
+
+                        if pair is not None:
+                            pairs.append(pair)
+
+                            print(
+                                f"[PMID2Title] Pair #{len(pairs)} | "
+                                f"{clean_pmid} -> {repr(target_word)} | "
+                                f"{corrupt_pmid} -> {repr(halluc_word)}"
+                            )
+
+                            break
+
+            # ================================================================
+            # Title -> PubMed URL
+            # ================================================================
+            elif task_name == "title2pub":
+
+                for i in range(len(real_samples)):
+
+                    if len(pairs) >= n_samples:
+                        break
+
+                    clean_sample = real_samples[i]
+
+                    clean_pmid = str(clean_sample["PMID"]).strip()
+                    clean_title = str(clean_sample["Title"]).strip()
+
+                    target_id = self.encode_url_token(clean_pmid)
+
+                    if target_id is None:
+                        continue
+
+                    # Search for a second paper whose first PMID token differs.
+                    for j in range(i + 1, len(real_samples)):
+
+                        corrupt_sample = real_samples[j]
+
+                        corrupt_pmid = str(corrupt_sample["PMID"]).strip()
+                        corrupt_title = str(corrupt_sample["Title"]).strip()
+
+                        halluc_id = self.encode_url_token(corrupt_pmid)
+
+                        if halluc_id is None:
+                            continue
+
+                        # Required for logit-difference measurement.
+                        if target_id == halluc_id:
+                            continue
+
+                        clean = (
+                            f"Article Title: {clean_title}\n"
+                            f"PubMed Link URL: "
+                            f"https://pubmed.ncbi.nlm.nih.gov/"
+                        )
+
+                        corrupt = (
+                            f"Article Title: {corrupt_title}\n"
+                            f"PubMed Link URL: "
+                            f"https://pubmed.ncbi.nlm.nih.gov/"
+                        )
+
+                        clean_prompt = self.format_prompt(clean)
+                        corrupt_prompt = self.format_prompt(corrupt)
+
+                        clean_ids = self.tokenizer(
+                            clean_prompt,
+                            return_tensors="pt"
+                        ).input_ids
+
+                        corrupt_ids = self.tokenizer(
+                            corrupt_prompt,
+                            return_tensors="pt"
+                        ).input_ids
+
+                        pair = {
+                            "clean_ids": clean_ids,
+                            "corrupt_ids": corrupt_ids,
+                            "target_id": target_id,
+                            "halluc_id": halluc_id,
+                        }
+
+                        pairs.append(pair)
+
+                        print(
+                            f"[Title2URL] Pair #{len(pairs)} | "
+                            f"target PMID={clean_pmid}, "
+                            f"token={target_id}, "
+                            f"decoded={repr(self.tokenizer.decode([target_id]))} | "
+                            f"corrupt PMID={corrupt_pmid}, "
+                            f"token={halluc_id}, "
+                            f"decoded={repr(self.tokenizer.decode([halluc_id]))}"
+                        )
+
+                        break
+
+            print(
+                f"[PairBuilder] Successfully generated "
+                f"{len(pairs)}/{n_samples} valid pairs for '{task_name}'.",
+                datetime.now()
+            )
+
+            return pairs
+
         for sample_idx, sample in enumerate(raw_samples):
             if len(pairs) >= n_samples:
                 break
@@ -112,31 +307,6 @@ class MedHALTPairBuilder:
                 if pair:
                     pairs.append(pair)
 
-            # 3. Memory: PMID -> Title
-            elif task_name == "pmid2title":
-                pmid = str(sample.get("pmid", ""))
-                title = sample.get("Title", sample.get("paper_title", "")).strip()
-                fake_title = sample.get("fake_title", "Unrelated Clinical Evaluation")
-                first_target_word = title.split()[0] if title else ""
-                first_halluc_word = fake_title.split()[0]
-
-                clean = f"Provide the title of PubMed paper with PMID {pmid}:\nTitle:"
-                corrupt = f"Provide the title of PubMed paper with PMID {pmid[::-1]}:\nTitle:"
-                pair = self.create_pair(clean, corrupt, first_target_word, first_halluc_word)
-                if pair:
-                    pairs.append(pair)
-
-            # 4. Memory: Title -> PubMed URL
-            elif task_name == "title2pub":
-                title = sample.get("Title", sample.get("paper_title", "")).strip()
-                pmid = str(sample.get("pmid", "12345678"))
-                fake_pmid = str(sample.get("fake_pmid", "87654321"))
-
-                clean = f"Article Title: {title}\nPubMed Link URL: https://pubmed.ncbi.nlm.nih.gov/"
-                corrupt = f"Article Title: {title} (Modified Retraction Review)\nPubMed Link URL: https://pubmed.ncbi.nlm.nih.gov/"
-                pair = self.create_pair(clean, corrupt, pmid[:4], fake_pmid[:4])
-                if pair:
-                    pairs.append(pair)
 
         print(f"[PairBuilder] Successfully generated {len(pairs)}/{n_samples} valid pairs for '{task_name}'.", datetime.now())
         return pairs
@@ -158,7 +328,7 @@ class CausalEngine:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        max_mem = {0: "9.5GiB", 1: "9.5GiB", 2: "9.5GiB", 3: "9.5GiB"}
+        max_mem = {0: "21GiB"}
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.float16,
@@ -171,8 +341,11 @@ class CausalEngine:
         self.layers = self.model.model.layers
         self.num_layers = self.model.config.num_hidden_layers
         self.num_heads = self.model.config.num_attention_heads
-        self.head_dim = getattr(self.model.config, "head_dim",
-                                self.model.config.hidden_size // self.num_heads)
+
+        self.head_dim = (
+                getattr(self.model.config, "head_dim", None)
+                or self.model.config.hidden_size // self.num_heads
+        )
 
         print(f"[Engine] Model Config: {self.num_layers} layers, {self.num_heads} heads, "
               f"head_dim={self.head_dim}, hidden_size={self.model.config.hidden_size}", datetime.now())
@@ -232,21 +405,55 @@ class CausalEngine:
         def hook_fn(module, inp, outp):
             if comp_type == "mlp":
                 if clean_act.shape[1] != outp.shape[1]:
-                    # Patching last-token slice if sequence lengths diverge
                     curr = outp.clone()
                     curr[:, -1, :] = clean_act[:, -1, :].to(outp.device)
                     return curr
+
                 return clean_act.to(outp.device)
+
             elif comp_type == "head":
-                curr = outp[0].clone()
-                B, S, _ = curr.shape
-                curr_reshaped = curr.view(B, S, self.num_heads, self.head_dim)
-                clean_reshaped = clean_act.to(curr.device).view_as(curr_reshaped)
-                if curr_reshaped.shape[1] != clean_reshaped.shape[1]:
-                    curr_reshaped[:, -1, head_idx, :] = clean_reshaped[:, -1, head_idx, :]
+                curr = outp[0].clone() if isinstance(outp, tuple) else outp.clone()
+
+                B, S, hidden = curr.shape
+
+                clean = clean_act.to(curr.device)
+                Bc, Sc, clean_hidden = clean.shape
+
+                if hidden != clean_hidden:
+                    raise RuntimeError(
+                        f"Hidden-size mismatch: corrupt={hidden}, clean={clean_hidden}"
+                    )
+
+                curr_reshaped = curr.reshape(
+                    B,
+                    S,
+                    self.num_heads,
+                    self.head_dim
+                )
+
+                clean_reshaped = clean.reshape(
+                    Bc,
+                    Sc,
+                    self.num_heads,
+                    self.head_dim
+                )
+
+                if S != Sc:
+                    curr_reshaped[:, -1, head_idx, :] = (
+                        clean_reshaped[:, -1, head_idx, :]
+                    )
                 else:
-                    curr_reshaped[:, :, head_idx, :] = clean_reshaped[:, :, head_idx, :]
-                return (curr_reshaped.view(B, S, -1),) + outp[1:]
+                    curr_reshaped[:, :, head_idx, :] = (
+                        clean_reshaped[:, :, head_idx, :]
+                    )
+
+                patched = curr_reshaped.reshape(B, S, hidden)
+
+                if isinstance(outp, tuple):
+                    return (patched,) + outp[1:]
+
+                return patched
+
             return outp
 
         target_module = self.layers[layer_idx].self_attn if comp_type == "head" else self.layers[layer_idx].mlp
@@ -265,152 +472,767 @@ class CausalEngine:
 # 3. Circuit Discovery and Cross-Task Transfer
 # =====================================================================
 
-def discover_circuit(engine: CausalEngine, dataset: List[Dict], top_k: int = 15) -> Tuple[List[Tuple], List[str]]:
-    """
-    Sweeps every attention head and MLP layer to compute Average Indirect Effect (AIE).
-    Returns the top-k components constituting the task circuit.
-    """
+def discover_circuit(
+    engine: CausalEngine,
+    dataset: List[Dict],
+    top_k: int = 15
+) -> Dict[str, object]:
+
     head_aie = np.zeros((engine.num_layers, engine.num_heads))
     mlp_aie = np.zeros(engine.num_layers)
+
     valid_count = 0
+    denom_values = []
 
-    print(f"\n[Discovery] Starting circuit discovery across {len(dataset)} samples...", datetime.now())
+    print(
+        f"\n[Discovery] Starting circuit discovery across "
+        f"{len(dataset)} samples...",
+        datetime.now()
+    )
 
-    for idx, sample in enumerate(tqdm(dataset, desc="Scanning Components", leave=False)):
+    for idx, sample in enumerate(
+        tqdm(dataset, desc="Scanning Components", leave=False)
+    ):
         clean_ids = sample["clean_ids"]
         corrupt_ids = sample["corrupt_ids"]
-        t_id, h_id = sample["target_id"], sample["halluc_id"]
 
-        d_clean = engine.get_logit_diff(clean_ids, t_id, h_id)
-        d_corrupt = engine.get_logit_diff(corrupt_ids, t_id, h_id)
+        t_id = sample["target_id"]
+        h_id = sample["halluc_id"]
+
+        d_clean = engine.get_logit_diff(
+            clean_ids,
+            t_id,
+            h_id
+        )
+
+        d_corrupt = engine.get_logit_diff(
+            corrupt_ids,
+            t_id,
+            h_id
+        )
+
         denom = d_clean - d_corrupt
 
         if abs(denom) < 1e-4:
-            print(f"[Discovery] Sample #{idx} dropped: small denominator ({denom:.6f}) | "
-                  f"d_clean={d_clean:.4f}, d_corrupt={d_corrupt:.4f}", datetime.now())
-            continue
-        valid_count += 1
-
-        head_cache, mlp_cache = engine.cache_clean_activations(clean_ids)
-
-        # 1. Sweep Heads
-        for l in range(engine.num_layers):
-            for h in range(engine.num_heads):
-                d_patched = engine.patch_single_component(
-                    corrupt_ids, t_id, h_id, "head", l, head_cache[l], head_idx=h
-                )
-                head_aie[l, h] += (d_patched - d_corrupt) / denom
-
-        # 2. Sweep MLPs
-        for l in range(engine.num_layers):
-            d_patched = engine.patch_single_component(
-                corrupt_ids, t_id, h_id, "mlp", l, mlp_cache[l]
+            print(
+                f"[Discovery] Sample #{idx} dropped: "
+                f"small denominator ({denom:.6f}) | "
+                f"d_clean={d_clean:.4f}, "
+                f"d_corrupt={d_corrupt:.4f}",
+                datetime.now()
             )
-            mlp_aie[l] += (d_patched - d_corrupt) / denom
+            continue
 
-    head_aie /= max(valid_count, 1)
-    mlp_aie /= max(valid_count, 1)
+        valid_count += 1
+        denom_values.append(denom)
 
-    print(f"[Discovery] Finished scanning. Valid samples: {valid_count}/{len(dataset)}", datetime.now())
-    print(f"[Discovery] Head AIE stats -> min: {head_aie.min():.4f}, max: {head_aie.max():.4f}, mean: {head_aie.mean():.4f}", datetime.now())
-    print(f"[Discovery] MLP AIE stats  -> min: {mlp_aie.min():.4f}, max: {mlp_aie.max():.4f}, mean: {mlp_aie.mean():.4f}", datetime.now())
+        head_cache, mlp_cache = (
+            engine.cache_clean_activations(clean_ids)
+        )
 
-    # Rank and collect top-k
+        # Attention heads
+        for layer in range(engine.num_layers):
+            for head in range(engine.num_heads):
+
+                d_patched = engine.patch_single_component(
+                    corrupt_ids,
+                    t_id,
+                    h_id,
+                    "head",
+                    layer,
+                    head_cache[layer],
+                    head_idx=head
+                )
+
+                head_aie[layer, head] += (
+                    d_patched - d_corrupt
+                ) / denom
+
+        # MLPs
+        for layer in range(engine.num_layers):
+
+            d_patched = engine.patch_single_component(
+                corrupt_ids,
+                t_id,
+                h_id,
+                "mlp",
+                layer,
+                mlp_cache[layer]
+            )
+
+            mlp_aie[layer] += (
+                d_patched - d_corrupt
+            ) / denom
+
+    if valid_count == 0:
+        raise RuntimeError(
+            "Circuit discovery failed: zero valid samples. "
+            "All clean/corrupt examples produced near-zero denominators."
+        )
+
+    head_aie /= valid_count
+    mlp_aie /= valid_count
+
     ranked = []
-    for l in range(engine.num_layers):
-        for h in range(engine.num_heads):
-            ranked.append((abs(head_aie[l, h]), f"L{l}H{h}", ("head", l, h)))
-        ranked.append((abs(mlp_aie[l]), f"L{l}MLP", ("mlp", l, None)))
 
-    ranked.sort(key=lambda x: x[0], reverse=True)
-    top_circuit = [item[2] for item in ranked[:top_k]]
-    top_labels = [item[1] for item in ranked[:top_k]]
+    for layer in range(engine.num_layers):
 
-    print(f"[Discovery] Top {min(5, top_k)} Components: {ranked[:5]}", datetime.now())
-    return top_circuit, top_labels
+        for head in range(engine.num_heads):
+
+            score = float(head_aie[layer, head])
+
+            ranked.append(
+                (
+                    abs(score),
+                    score,
+                    f"L{layer}H{head}",
+                    ("head", layer, head)
+                )
+            )
+
+        score = float(mlp_aie[layer])
+
+        ranked.append(
+            (
+                abs(score),
+                score,
+                f"L{layer}MLP",
+                ("mlp", layer, None)
+            )
+        )
+
+    ranked.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+    top = ranked[:top_k]
+
+    top_circuit = [
+        x[3] for x in top
+    ]
+
+    top_labels = [
+        x[2] for x in top
+    ]
+
+    top_scores = [
+        x[1] for x in top
+    ]
+
+    num_top_heads = sum(
+        component[0] == "head"
+        for component in top_circuit
+    )
+
+    num_top_mlps = sum(
+        component[0] == "mlp"
+        for component in top_circuit
+    )
+
+    print(
+        f"[Discovery] Finished. "
+        f"Valid samples: {valid_count}/{len(dataset)}",
+        datetime.now()
+    )
+
+    print("[Discovery] Top components:")
+
+    for rank, (label, score) in enumerate(
+        zip(top_labels, top_scores),
+        1
+    ):
+        print(
+            f"  {rank:2d}. {label:<10} "
+            f"AIE={score:+.6f}"
+        )
+
+    return {
+        "circuit": top_circuit,
+        "labels": top_labels,
+        "scores": top_scores,
+
+        "head_aie": head_aie,
+        "mlp_aie": mlp_aie,
+
+        "valid_count": valid_count,
+        "total_count": len(dataset),
+
+        "valid_fraction":
+            valid_count / len(dataset),
+
+        "mean_abs_head_aie":
+            float(np.mean(np.abs(head_aie))),
+
+        "max_abs_head_aie":
+            float(np.max(np.abs(head_aie))),
+
+        "mean_abs_mlp_aie":
+            float(np.mean(np.abs(mlp_aie))),
+
+        "max_abs_mlp_aie":
+            float(np.max(np.abs(mlp_aie))),
+
+        "mean_clean_corrupt_gap":
+            float(np.mean(denom_values)),
+
+        "std_clean_corrupt_gap":
+            float(np.std(denom_values)),
+
+        "top_head_count":
+            num_top_heads,
+
+        "top_mlp_count":
+            num_top_mlps,
+    }
 
 
 def evaluate_circuit_transfer(
-        engine: CausalEngine,
-        circuit: List[Tuple],
-        target_dataset: List[Dict]
-) -> float:
-    """
-    Patches all components of a source circuit simultaneously into target task inputs
-    to measure causal transfer T_{s -> t}.
-    """
-    total_transfer = 0.0
-    valid_count = 0
+    engine: CausalEngine,
+    circuit: List[Tuple],
+    target_dataset: List[Dict]
+) -> Dict[str, object]:
 
-    for idx, sample in enumerate(tqdm(target_dataset, desc="Evaluating Transfer", leave=False)):
+    transfer_scores = []
+    raw_restorations = []
+    clean_corrupt_gaps = []
+
+    total_count = len(target_dataset)
+
+    for idx, sample in enumerate(
+        tqdm(
+            target_dataset,
+            desc="Evaluating Transfer",
+            leave=False
+        )
+    ):
+
         clean_ids = sample["clean_ids"]
         corrupt_ids = sample["corrupt_ids"]
-        t_id, h_id = sample["target_id"], sample["halluc_id"]
 
-        d_clean = engine.get_logit_diff(clean_ids, t_id, h_id)
-        d_corrupt = engine.get_logit_diff(corrupt_ids, t_id, h_id)
+        t_id = sample["target_id"]
+        h_id = sample["halluc_id"]
+
+        d_clean = engine.get_logit_diff(
+            clean_ids,
+            t_id,
+            h_id
+        )
+
+        d_corrupt = engine.get_logit_diff(
+            corrupt_ids,
+            t_id,
+            h_id
+        )
+
         denom = d_clean - d_corrupt
 
         if abs(denom) < 1e-4:
-            print(f"[Transfer] Sample #{idx} dropped: small denominator ({denom:.6f})", datetime.now())
+            print(
+                f"[Transfer] Sample #{idx} dropped: "
+                f"small denominator ({denom:.6f})",
+                datetime.now()
+            )
             continue
-        valid_count += 1
 
-        head_cache, mlp_cache = engine.cache_clean_activations(clean_ids)
+        head_cache, mlp_cache = (
+            engine.cache_clean_activations(clean_ids)
+        )
+
         handles = []
 
-        # Hook all components of the circuit simultaneously
         for comp_type, layer_idx, head_idx in circuit:
+
             if comp_type == "mlp":
+
                 act = mlp_cache[layer_idx]
 
                 def get_mlp_hook(a):
+
                     def hook(m, inp, outp):
+
                         if a.shape[1] != outp.shape[1]:
+
                             curr = outp.clone()
-                            curr[:, -1, :] = a[:, -1, :].to(outp.device)
+
+                            curr[:, -1, :] = (
+                                a[:, -1, :]
+                                .to(outp.device)
+                            )
+
                             return curr
+
                         return a.to(outp.device)
+
                     return hook
 
-                h = engine.layers[layer_idx].mlp.register_forward_hook(get_mlp_hook(act))
-                handles.append(h)
+                handle = (
+                    engine.layers[layer_idx]
+                    .mlp
+                    .register_forward_hook(
+                        get_mlp_hook(act)
+                    )
+                )
+
+                handles.append(handle)
+
             elif comp_type == "head":
+
                 act = head_cache[layer_idx]
                 h_idx = head_idx
 
                 def get_head_hook(a, target_h):
+
                     def hook(m, inp, outp):
-                        curr = outp[0].clone()
-                        B, S, _ = curr.shape
-                        cr = curr.view(B, S, engine.num_heads, engine.head_dim)
-                        ca = a.to(curr.device).view_as(cr)
-                        if cr.shape[1] != ca.shape[1]:
-                            cr[:, -1, target_h, :] = ca[:, -1, target_h, :]
+
+                        curr = (
+                            outp[0].clone()
+                            if isinstance(outp, tuple)
+                            else outp.clone()
+                        )
+
+                        B, S, hidden = curr.shape
+
+                        clean = a.to(curr.device)
+
+                        Bc, Sc, _ = clean.shape
+
+                        cr = curr.reshape(
+                            B,
+                            S,
+                            engine.num_heads,
+                            engine.head_dim
+                        )
+
+                        ca = clean.reshape(
+                            Bc,
+                            Sc,
+                            engine.num_heads,
+                            engine.head_dim
+                        )
+
+                        if S != Sc:
+
+                            cr[
+                                :,
+                                -1,
+                                target_h,
+                                :
+                            ] = ca[
+                                :,
+                                -1,
+                                target_h,
+                                :
+                            ]
+
                         else:
-                            cr[:, :, target_h, :] = ca[:, :, target_h, :]
-                        return (cr.view(B, S, -1),) + outp[1:]
+
+                            cr[
+                                :,
+                                :,
+                                target_h,
+                                :
+                            ] = ca[
+                                :,
+                                :,
+                                target_h,
+                                :
+                            ]
+
+                        patched = cr.reshape(
+                            B,
+                            S,
+                            hidden
+                        )
+
+                        if isinstance(outp, tuple):
+                            return (
+                                patched,
+                            ) + outp[1:]
+
+                        return patched
 
                     return hook
 
-                h = engine.layers[layer_idx].self_attn.register_forward_hook(get_head_hook(act, h_idx))
-                handles.append(h)
+                handle = (
+                    engine.layers[layer_idx]
+                    .self_attn
+                    .register_forward_hook(
+                        get_head_hook(
+                            act,
+                            h_idx
+                        )
+                    )
+                )
+
+                handles.append(handle)
 
         with torch.inference_mode():
-            outputs = engine.model(corrupt_ids.to(engine.model.device))
-            logits = outputs.logits[0, -1, :]
-            patched_diff = (logits[t_id] - logits[h_id]).item()
 
-        for h in handles:
-            h.remove()
+            outputs = engine.model(
+                corrupt_ids.to(
+                    engine.model.device
+                )
+            )
 
-        step_transfer = (patched_diff - d_corrupt) / denom
-        total_transfer += step_transfer
+            logits = outputs.logits[
+                0,
+                -1,
+                :
+            ]
 
-    avg_transfer = float(total_transfer / max(valid_count, 1))
-    print(f"[Transfer] Completed evaluation across {valid_count} valid samples. Avg Transfer: {avg_transfer:.4f}", datetime.now())
-    return avg_transfer
+            patched_diff = (
+                logits[t_id]
+                - logits[h_id]
+            ).item()
 
+        for handle in handles:
+            handle.remove()
+
+        raw_restoration = (
+            patched_diff - d_corrupt
+        )
+
+        transfer = (
+            raw_restoration / denom
+        )
+
+        transfer_scores.append(transfer)
+        raw_restorations.append(raw_restoration)
+        clean_corrupt_gaps.append(denom)
+
+    valid_count = len(transfer_scores)
+
+    if valid_count == 0:
+
+        return {
+            "mean": np.nan,
+            "median": np.nan,
+            "std": np.nan,
+            "q25": np.nan,
+            "q75": np.nan,
+            "min": np.nan,
+            "max": np.nan,
+            "mean_abs": np.nan,
+
+            "positive_rate": np.nan,
+            "negative_rate": np.nan,
+            "overshoot_rate": np.nan,
+
+            "mean_raw_restoration": np.nan,
+            "mean_clean_corrupt_gap": np.nan,
+
+            "valid_count": 0,
+            "dropped_count": total_count,
+            "valid_fraction": 0.0,
+
+            "scores": [],
+        }
+
+    scores = np.asarray(
+        transfer_scores,
+        dtype=float
+    )
+
+    stats = {
+        "mean":
+            float(np.mean(scores)),
+
+        "median":
+            float(np.median(scores)),
+
+        "std":
+            float(
+                np.std(
+                    scores,
+                    ddof=1
+                )
+                if valid_count > 1
+                else 0.0
+            ),
+
+        "q25":
+            float(
+                np.percentile(
+                    scores,
+                    25
+                )
+            ),
+
+        "q75":
+            float(
+                np.percentile(
+                    scores,
+                    75
+                )
+            ),
+
+        "min":
+            float(np.min(scores)),
+
+        "max":
+            float(np.max(scores)),
+
+        "mean_abs":
+            float(
+                np.mean(
+                    np.abs(scores)
+                )
+            ),
+
+        "positive_rate":
+            float(
+                np.mean(scores > 0)
+            ),
+
+        "negative_rate":
+            float(
+                np.mean(scores < 0)
+            ),
+
+        # >1 means patching restores more than the
+        # measured clean-corrupt difference.
+        "overshoot_rate":
+            float(
+                np.mean(scores > 1)
+            ),
+
+        "mean_raw_restoration":
+            float(
+                np.mean(
+                    raw_restorations
+                )
+            ),
+
+        "mean_clean_corrupt_gap":
+            float(
+                np.mean(
+                    clean_corrupt_gaps
+                )
+            ),
+
+        "valid_count":
+            valid_count,
+
+        "dropped_count":
+            total_count - valid_count,
+
+        "valid_fraction":
+            valid_count / total_count,
+
+        "scores":
+            transfer_scores,
+    }
+
+    print(
+        f"[Transfer] n={valid_count}/{total_count} | "
+        f"mean={stats['mean']:.4f} | "
+        f"median={stats['median']:.4f} | "
+        f"std={stats['std']:.4f} | "
+        f"positive={stats['positive_rate']:.2%}",
+        datetime.now()
+    )
+
+    return stats
+
+def save_heatmap(
+    matrix,
+    labels,
+    title,
+    path,
+    fmt=".3f"
+):
+    matrix = np.asarray(
+        matrix,
+        dtype=float
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(8, 6)
+    )
+
+    im = ax.imshow(matrix)
+
+    ax.set_xticks(
+        range(len(labels))
+    )
+
+    ax.set_yticks(
+        range(len(labels))
+    )
+
+    ax.set_xticklabels(
+        labels,
+        rotation=35,
+        ha="right"
+    )
+
+    ax.set_yticklabels(labels)
+
+    ax.set_xlabel("Target Task")
+    ax.set_ylabel("Source Task")
+
+    ax.set_title(title)
+
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+
+            value = matrix[i, j]
+
+            text = (
+                "NA"
+                if np.isnan(value)
+                else format(value, fmt)
+            )
+
+            ax.text(
+                j,
+                i,
+                text,
+                ha="center",
+                va="center"
+            )
+
+    fig.colorbar(im, ax=ax)
+
+    fig.tight_layout()
+    fig.savefig(
+        path,
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
+
+
+def save_head_aie_heatmap(
+    head_aie,
+    task_name,
+    output_path
+):
+    fig, ax = plt.subplots(
+        figsize=(12, 8)
+    )
+
+    im = ax.imshow(
+        head_aie,
+        aspect="auto"
+    )
+
+    ax.set_xlabel("Attention Head")
+    ax.set_ylabel("Layer")
+
+    ax.set_title(
+        f"{task_name}: Attention Head AIE"
+    )
+
+    fig.colorbar(
+        im,
+        ax=ax,
+        label="Average Indirect Effect"
+    )
+
+    fig.tight_layout()
+
+    fig.savefig(
+        output_path,
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
+
+
+def save_mlp_aie_plot(
+    mlp_aie,
+    task_name,
+    output_path
+):
+    layers = np.arange(
+        len(mlp_aie)
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(10, 5)
+    )
+
+    ax.bar(
+        layers,
+        mlp_aie
+    )
+
+    ax.axhline(
+        0,
+        linewidth=1
+    )
+
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("AIE")
+
+    ax.set_title(
+        f"{task_name}: MLP AIE by Layer"
+    )
+
+    fig.tight_layout()
+
+    fig.savefig(
+        output_path,
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
+
+
+def save_top_circuit_plot(
+    labels,
+    scores,
+    task_name,
+    output_path
+):
+    order = np.arange(
+        len(labels)
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(9, 6)
+    )
+
+    ax.barh(
+        order,
+        scores
+    )
+
+    ax.set_yticks(order)
+
+    ax.set_yticklabels(
+        labels
+    )
+
+    ax.axvline(
+        0,
+        linewidth=1
+    )
+
+    ax.set_xlabel(
+        "Signed Average Indirect Effect"
+    )
+
+    ax.set_title(
+        f"{task_name}: Top Circuit Components"
+    )
+
+    ax.invert_yaxis()
+
+    fig.tight_layout()
+
+    fig.savefig(
+        output_path,
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
 
 # =====================================================================
 # 4. Main Experiment Orchestrator
@@ -445,54 +1267,720 @@ def main():
         datasets[task_key] = pair_builder.prepare_dataset(dataset_name, n_samples=args.n_samples)
         print(f"[MAIN] Loaded {len(datasets[task_key])} valid pairs for {task_key}", datetime.now())
 
-    print("\n--- Phase 1: Task Circuit Discovery (AIE Sweeps) ---", datetime.now())
+    for task_key, samples in datasets.items():
+        if len(samples) == 0:
+            raise RuntimeError(
+                f"{task_key} produced zero valid contrastive pairs. "
+                "Fix dataset construction before running circuit discovery."
+            )
+
+    plots_dir = os.path.join(
+        args.output_dir,
+        "plots"
+    )
+
+    os.makedirs(
+        plots_dir,
+        exist_ok=True
+    )
+
+    # ================================================================
+    # PHASE 1: Circuit discovery
+    # ================================================================
+
+    print(
+        "\n--- Phase 1: Task Circuit Discovery ---",
+        datetime.now()
+    )
+
     circuits = {}
     labels = {}
+    discovery_results = {}
+
+    discovery_rows = []
+    component_rows = []
+
     for task_key in tasks.keys():
-        print(f"\n[MAIN] Discovering top-{args.top_k} circuit for: {task_key}...", datetime.now())
-        circuit, comp_labels = discover_circuit(engine, datasets[task_key], top_k=args.top_k)
-        circuits[task_key] = circuit
-        labels[task_key] = set(comp_labels)
-        print(f"[{task_key}] Discovered Components: {comp_labels}", datetime.now())
 
-    print("\n--- Phase 2: Cross-Task Causal Transfer Matrix Computation ---", datetime.now())
+        print(
+            f"\n[MAIN] Discovering "
+            f"top-{args.top_k} circuit for "
+            f"{task_key}...",
+            datetime.now()
+        )
+
+        result = discover_circuit(
+            engine,
+            datasets[task_key],
+            top_k=args.top_k
+        )
+
+        discovery_results[
+            task_key
+        ] = result
+
+        circuits[
+            task_key
+        ] = result["circuit"]
+
+        labels[
+            task_key
+        ] = set(result["labels"])
+
+        discovery_rows.append({
+            "task":
+                task_key,
+
+            "total_samples":
+                result["total_count"],
+
+            "valid_samples":
+                result["valid_count"],
+
+            "valid_fraction":
+                result["valid_fraction"],
+
+            "mean_abs_head_aie":
+                result["mean_abs_head_aie"],
+
+            "max_abs_head_aie":
+                result["max_abs_head_aie"],
+
+            "mean_abs_mlp_aie":
+                result["mean_abs_mlp_aie"],
+
+            "max_abs_mlp_aie":
+                result["max_abs_mlp_aie"],
+
+            "mean_clean_corrupt_gap":
+                result["mean_clean_corrupt_gap"],
+
+            "std_clean_corrupt_gap":
+                result["std_clean_corrupt_gap"],
+
+            "top_head_count":
+                result["top_head_count"],
+
+            "top_mlp_count":
+                result["top_mlp_count"],
+        })
+
+        for rank, (
+            component,
+            label,
+            score
+        ) in enumerate(
+            zip(
+                result["circuit"],
+                result["labels"],
+                result["scores"]
+            ),
+            1
+        ):
+            component_rows.append({
+                "task":
+                    task_key,
+
+                "rank":
+                    rank,
+
+                "component":
+                    label,
+
+                "component_type":
+                    component[0],
+
+                "layer":
+                    component[1],
+
+                "head":
+                    component[2],
+
+                "aie":
+                    score,
+
+                "abs_aie":
+                    abs(score),
+            })
+
+        save_head_aie_heatmap(
+            result["head_aie"],
+            task_key,
+            os.path.join(
+                plots_dir,
+                f"{task_key}_head_aie.png"
+            )
+        )
+
+        save_mlp_aie_plot(
+            result["mlp_aie"],
+            task_key,
+            os.path.join(
+                plots_dir,
+                f"{task_key}_mlp_aie.png"
+            )
+        )
+
+        save_top_circuit_plot(
+            result["labels"],
+            result["scores"],
+            task_key,
+            os.path.join(
+                plots_dir,
+                f"{task_key}_top_circuit.png"
+            )
+        )
+
+    # ================================================================
+    # PHASE 2: Cross-task transfer
+    # ================================================================
+
+    print(
+        "\n--- Phase 2: Cross-Task Transfer ---",
+        datetime.now()
+    )
+
     task_keys = list(tasks.keys())
-    transfer_matrix = np.zeros((4, 4))
-    jaccard_matrix = np.zeros((4, 4))
+    n_tasks = len(task_keys)
 
-    for i, s_task in enumerate(task_keys):
-        for j, t_task in enumerate(task_keys):
+    transfer_mean = np.full(
+        (n_tasks, n_tasks),
+        np.nan
+    )
+
+    transfer_median = np.full(
+        (n_tasks, n_tasks),
+        np.nan
+    )
+
+    transfer_std = np.full(
+        (n_tasks, n_tasks),
+        np.nan
+    )
+
+    transfer_valid = np.full(
+        (n_tasks, n_tasks),
+        np.nan
+    )
+
+    positive_rate = np.full(
+        (n_tasks, n_tasks),
+        np.nan
+    )
+
+    mean_abs_transfer = np.full(
+        (n_tasks, n_tasks),
+        np.nan
+    )
+
+    jaccard_matrix = np.zeros(
+        (n_tasks, n_tasks)
+    )
+
+    dice_matrix = np.zeros(
+        (n_tasks, n_tasks)
+    )
+
+    overlap_matrix = np.zeros(
+        (n_tasks, n_tasks)
+    )
+
+    pairwise_rows = []
+
+    for i, source_task in enumerate(task_keys):
+
+        for j, target_task in enumerate(task_keys):
+
+            source_set = labels[source_task]
+            target_set = labels[target_task]
+
+            intersection = len(
+                source_set & target_set
+            )
+
+            union = len(
+                source_set | target_set
+            )
+
+            jaccard = (
+                intersection / union
+                if union
+                else np.nan
+            )
+
+            dice_denominator = (
+                len(source_set)
+                + len(target_set)
+            )
+
+            dice = (
+                2 * intersection
+                / dice_denominator
+                if dice_denominator
+                else np.nan
+            )
+
+            overlap_denominator = min(
+                len(source_set),
+                len(target_set)
+            )
+
+            overlap = (
+                intersection
+                / overlap_denominator
+                if overlap_denominator
+                else np.nan
+            )
+
+            jaccard_matrix[
+                i,
+                j
+            ] = jaccard
+
+            dice_matrix[
+                i,
+                j
+            ] = dice
+
+            overlap_matrix[
+                i,
+                j
+            ] = overlap
+
+            # Self-transfer is defined as identity.
             if i == j:
-                transfer_matrix[i, j] = 1.0
-                print(f"[MAIN] Transfer {s_task} -> {t_task}: 1.0000 (Self)", datetime.now())
+
+                stats = {
+                    "mean": 1.0,
+                    "median": 1.0,
+                    "std": 0.0,
+                    "q25": 1.0,
+                    "q75": 1.0,
+                    "min": 1.0,
+                    "max": 1.0,
+                    "mean_abs": 1.0,
+                    "positive_rate": 1.0,
+                    "negative_rate": 0.0,
+                    "overshoot_rate": 0.0,
+                    "mean_raw_restoration": np.nan,
+                    "mean_clean_corrupt_gap": np.nan,
+                    "valid_count":
+                        len(datasets[target_task]),
+                    "dropped_count": 0,
+                    "valid_fraction": 1.0,
+                }
+
             else:
-                print(f"[MAIN] Evaluating Transfer {s_task} -> {t_task}...", datetime.now())
-                score = evaluate_circuit_transfer(engine, circuits[s_task], datasets[t_task])
-                transfer_matrix[i, j] = score
-                print(f"[MAIN] Transfer {s_task} -> {t_task}: {score:.4f}", datetime.now())
 
-            # Jaccard circuit similarity
-            inter = len(labels[s_task] & labels[t_task])
-            union = len(labels[s_task] | labels[t_task])
-            jaccard_matrix[i, j] = inter / max(union, 1)
+                print(
+                    f"[MAIN] "
+                    f"{source_task} -> "
+                    f"{target_task}",
+                    datetime.now()
+                )
 
-    df_transfer = pd.DataFrame(transfer_matrix, index=task_keys, columns=task_keys).round(4)
-    df_jaccard = pd.DataFrame(jaccard_matrix, index=task_keys, columns=task_keys).round(4)
+                stats = (
+                    evaluate_circuit_transfer(
+                        engine,
+                        circuits[source_task],
+                        datasets[target_task]
+                    )
+                )
 
-    # Save results
-    transfer_path = os.path.join(args.output_dir, f"{clean_model_id}_causal_transfer_matrix.csv")
-    jaccard_path = os.path.join(args.output_dir, f"{clean_model_id}_jaccard_overlap_matrix.csv")
+            transfer_mean[
+                i,
+                j
+            ] = stats["mean"]
 
-    df_transfer.to_csv(transfer_path)
-    df_jaccard.to_csv(jaccard_path)
+            transfer_median[
+                i,
+                j
+            ] = stats["median"]
 
-    print("\n=================== RESULTS ===================")
-    print("CROSS-TASK CAUSAL TRANSFER MATRIX (T_{s -> t}):", datetime.now())
-    print(df_transfer, datetime.now())
-    print("\nCIRCUIT JACCARD OVERLAP MATRIX:", datetime.now())
-    print(df_jaccard, datetime.now())
-    print(f"\nSaved CSVs to: {args.output_dir}", datetime.now())
+            transfer_std[
+                i,
+                j
+            ] = stats["std"]
 
+            transfer_valid[
+                i,
+                j
+            ] = stats["valid_fraction"]
+
+            positive_rate[
+                i,
+                j
+            ] = stats["positive_rate"]
+
+            mean_abs_transfer[
+                i,
+                j
+            ] = stats["mean_abs"]
+
+            pairwise_rows.append({
+                "source_task":
+                    source_task,
+
+                "target_task":
+                    target_task,
+
+                "mean_transfer":
+                    stats["mean"],
+
+                "median_transfer":
+                    stats["median"],
+
+                "std_transfer":
+                    stats["std"],
+
+                "q25_transfer":
+                    stats["q25"],
+
+                "q75_transfer":
+                    stats["q75"],
+
+                "min_transfer":
+                    stats["min"],
+
+                "max_transfer":
+                    stats["max"],
+
+                "mean_abs_transfer":
+                    stats["mean_abs"],
+
+                "positive_rate":
+                    stats["positive_rate"],
+
+                "negative_rate":
+                    stats["negative_rate"],
+
+                "overshoot_rate":
+                    stats["overshoot_rate"],
+
+                "valid_samples":
+                    stats["valid_count"],
+
+                "dropped_samples":
+                    stats["dropped_count"],
+
+                "valid_fraction":
+                    stats["valid_fraction"],
+
+                "mean_raw_restoration":
+                    stats["mean_raw_restoration"],
+
+                "mean_clean_corrupt_gap":
+                    stats["mean_clean_corrupt_gap"],
+
+                "jaccard":
+                    jaccard,
+
+                "dice":
+                    dice,
+
+                "overlap_coefficient":
+                    overlap,
+            })
+
+    # Directionality:
+    # positive [i,j] means i->j exceeds j->i.
+    transfer_asymmetry = (
+        transfer_mean
+        - transfer_mean.T
+    )
+
+    # ================================================================
+    # DataFrames
+    # ================================================================
+
+    df_transfer = pd.DataFrame(
+        transfer_mean,
+        index=task_keys,
+        columns=task_keys
+    )
+
+    df_median = pd.DataFrame(
+        transfer_median,
+        index=task_keys,
+        columns=task_keys
+    )
+
+    df_std = pd.DataFrame(
+        transfer_std,
+        index=task_keys,
+        columns=task_keys
+    )
+
+    df_valid = pd.DataFrame(
+        transfer_valid,
+        index=task_keys,
+        columns=task_keys
+    )
+
+    df_positive = pd.DataFrame(
+        positive_rate,
+        index=task_keys,
+        columns=task_keys
+    )
+
+    df_abs = pd.DataFrame(
+        mean_abs_transfer,
+        index=task_keys,
+        columns=task_keys
+    )
+
+    df_jaccard = pd.DataFrame(
+        jaccard_matrix,
+        index=task_keys,
+        columns=task_keys
+    )
+
+    df_dice = pd.DataFrame(
+        dice_matrix,
+        index=task_keys,
+        columns=task_keys
+    )
+
+    df_overlap = pd.DataFrame(
+        overlap_matrix,
+        index=task_keys,
+        columns=task_keys
+    )
+
+    df_asymmetry = pd.DataFrame(
+        transfer_asymmetry,
+        index=task_keys,
+        columns=task_keys
+    )
+
+    df_pairwise = pd.DataFrame(
+        pairwise_rows
+    )
+
+    df_discovery = pd.DataFrame(
+        discovery_rows
+    )
+
+    df_components = pd.DataFrame(
+        component_rows
+    )
+
+    # ================================================================
+    # Save CSVs
+    # ================================================================
+
+    prefix = os.path.join(
+        args.output_dir,
+        clean_model_id
+    )
+
+    df_transfer.to_csv(
+        prefix
+        + "_transfer_mean.csv"
+    )
+
+    df_median.to_csv(
+        prefix
+        + "_transfer_median.csv"
+    )
+
+    df_std.to_csv(
+        prefix
+        + "_transfer_std.csv"
+    )
+
+    df_valid.to_csv(
+        prefix
+        + "_transfer_valid_fraction.csv"
+    )
+
+    df_positive.to_csv(
+        prefix
+        + "_transfer_positive_rate.csv"
+    )
+
+    df_abs.to_csv(
+        prefix
+        + "_transfer_mean_abs.csv"
+    )
+
+    df_jaccard.to_csv(
+        prefix
+        + "_jaccard.csv"
+    )
+
+    df_dice.to_csv(
+        prefix
+        + "_dice.csv"
+    )
+
+    df_overlap.to_csv(
+        prefix
+        + "_overlap_coefficient.csv"
+    )
+
+    df_asymmetry.to_csv(
+        prefix
+        + "_transfer_asymmetry.csv"
+    )
+
+    df_pairwise.to_csv(
+        prefix
+        + "_pairwise_metrics.csv",
+        index=False
+    )
+
+    df_discovery.to_csv(
+        prefix
+        + "_discovery_metrics.csv",
+        index=False
+    )
+
+    df_components.to_csv(
+        prefix
+        + "_top_components.csv",
+        index=False
+    )
+
+    # ================================================================
+    # Heatmaps
+    # ================================================================
+
+    save_heatmap(
+        transfer_mean,
+        task_keys,
+        "Mean Causal Transfer",
+        os.path.join(
+            plots_dir,
+            "transfer_mean_heatmap.png"
+        )
+    )
+
+    save_heatmap(
+        transfer_median,
+        task_keys,
+        "Median Causal Transfer",
+        os.path.join(
+            plots_dir,
+            "transfer_median_heatmap.png"
+        )
+    )
+
+    save_heatmap(
+        transfer_std,
+        task_keys,
+        "Transfer Standard Deviation",
+        os.path.join(
+            plots_dir,
+            "transfer_std_heatmap.png"
+        )
+    )
+
+    save_heatmap(
+        transfer_valid,
+        task_keys,
+        "Valid Sample Fraction",
+        os.path.join(
+            plots_dir,
+            "valid_fraction_heatmap.png"
+        )
+    )
+
+    save_heatmap(
+        jaccard_matrix,
+        task_keys,
+        "Circuit Jaccard Similarity",
+        os.path.join(
+            plots_dir,
+            "jaccard_heatmap.png"
+        )
+    )
+
+    save_heatmap(
+        dice_matrix,
+        task_keys,
+        "Circuit Dice Similarity",
+        os.path.join(
+            plots_dir,
+            "dice_heatmap.png"
+        )
+    )
+
+    save_heatmap(
+        transfer_asymmetry,
+        task_keys,
+        "Directional Transfer Asymmetry",
+        os.path.join(
+            plots_dir,
+            "transfer_asymmetry_heatmap.png"
+        )
+    )
+
+    print(
+        "\n================ RESULTS ================"
+    )
+
+    print(
+        "\nMean Transfer:"
+    )
+
+    print(
+        df_transfer.round(4)
+    )
+
+    print(
+        "\nTransfer Std:"
+    )
+
+    print(
+        df_std.round(4)
+    )
+
+    print(
+        "\nJaccard:"
+    )
+
+    print(
+        df_jaccard.round(4)
+    )
+
+    print(
+        f"\nAll metrics saved to: "
+        f"{args.output_dir}"
+    )
+
+    print(
+        f"Plots saved to: "
+        f"{plots_dir}"
+    )
+
+
+def save_results():
+    from huggingface_hub import HfApi, create_repo
+
+    repo_id = "damonsalvatore123/medhalt"
+    results_dir = "/root/medhalt-main/medhalt-main/causal_results"
+
+    # Create the repository if it doesn't already exist
+    create_repo(
+        repo_id=repo_id,
+        repo_type="dataset",
+        exist_ok=True,
+        private=False,  # change to True if you want a private repo
+    )
+
+    api = HfApi()
+
+    api.upload_folder(
+        folder_path=results_dir,
+        repo_id=repo_id,
+        repo_type="dataset",
+        path_in_repo=".",
+        commit_message="Upload MedHALT causal transfer results",
+    )
+
+    print(f"Uploaded results to: https://huggingface.co/datasets/{repo_id}")
 
 if __name__ == "__main__":
     main()
+    save_results()

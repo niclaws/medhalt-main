@@ -30,22 +30,25 @@ class CausalMediationHarness:
             print(f"[Harness Init] pad_token set to eos_token (ID: {self.tokenizer.pad_token_id})", datetime.now())
 
         # Optimal layer mapping across 4 x 11GB GPUs
-        max_memory = {0: "10GiB", 1: "10GiB", 2: "10GiB", 3: "10GiB"}
+        max_mem = {0: "21GiB"}
 
         print(f"[Harness Init] Loading model with device_map='auto' and max_memory={max_memory}...", datetime.now())
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             torch_dtype=torch.float16,
             device_map="auto",
-            max_memory=max_memory,
+            max_memory=max_mem,
             trust_remote_code=True
         )
         self.model.eval()
 
         self.num_layers = self.model.config.num_hidden_layers
         self.num_heads = self.model.config.num_attention_heads
-        self.head_dim = getattr(self.model.config, "head_dim",
-                                self.model.config.hidden_size // self.num_heads)
+
+        self.head_dim = (
+                getattr(self.model.config, "head_dim", None)
+                or self.model.config.hidden_size // self.num_heads
+        )
 
         # Locate transformer layers
         if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
