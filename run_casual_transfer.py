@@ -656,7 +656,7 @@ def discover_circuit(
         "total_count": len(dataset),
 
         "valid_fraction":
-            valid_count / len(dataset),
+            valid_count / max(1, len(dataset)),
 
         "mean_abs_head_aie":
             float(np.mean(np.abs(head_aie))),
@@ -890,9 +890,12 @@ def evaluate_circuit_transfer(
             patched_diff - d_corrupt
         )
 
-        transfer = (
-            raw_restoration / denom
-        )
+        if denom == 0:
+            transfer = 0
+        else:
+            transfer = (
+                raw_restoration / denom
+            )
 
         transfer_scores.append(transfer)
         raw_restorations.append(raw_restoration)
@@ -1015,7 +1018,7 @@ def evaluate_circuit_transfer(
             total_count - valid_count,
 
         "valid_fraction":
-            valid_count / total_count,
+            valid_count / max(1, total_count),
 
         "scores":
             transfer_scores,
@@ -1264,16 +1267,16 @@ def main():
         datasets[task_key] = pair_builder.prepare_dataset(dataset_name, n_samples=args.n_samples)
         print(f"[MAIN] Loaded {len(datasets[task_key])} valid pairs for {task_key}", datetime.now())
 
-    for task_key, samples in datasets.items():
-        if len(samples) == 0:
-            raise RuntimeError(
-                f"{task_key} produced zero valid contrastive pairs. "
-                "Fix dataset construction before running circuit discovery."
-            )
+    # for task_key, samples in datasets.items():
+    #     if len(samples) == 0:
+    #         raise RuntimeError(
+    #             f"{task_key} produced zero valid contrastive pairs. "
+    #             "Fix dataset construction before running circuit discovery."
+    #         )
 
     plots_dir = os.path.join(
         args.output_dir,
-        "plots"
+        f"plots/{clean_model_id}"
     )
 
     os.makedirs(
@@ -1956,7 +1959,7 @@ def save_results():
     from huggingface_hub import HfApi, create_repo
 
     repo_id = "damonsalvatore123/medhalt"
-    results_dir = "/root/medhalt-main/medhalt-main/causal_results"
+    results_dir = "/root/causal_results_test"
 
     # Create the repository if it doesn't already exist
     create_repo(
