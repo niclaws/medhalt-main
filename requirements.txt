@@ -1,0 +1,19 @@
+# --- Core Deep Learning & Transformer Inference ---
+torch>=2.1.0
+transformers>=4.40.0
+accelerate>=0.28.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
+
+# --- Flash Attention / Optimized Attention (Optional but recommended) ---
+bitsandbytes>=0.43.0
+
+# --- Data Handling & Scientific Computing ---
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0
+tqdm>=4.66.0
+scipy>=1.10.0
+
+# --- Med-HALT Dataset & Hugging Face Hub ---
+datasets>=2.18.0
+huggingface_hub>=0.20.0
