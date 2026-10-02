@@ -1,0 +1,21 @@
+Evaluate Mistral-7B-Instruct-v0.3
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run python run_causal_transfer.py \
+    --model_name mistralai/Mistral-7B-Instruct-v0.3 \
+    --n_samples 40 \
+    --top_k 15 \
+    --output_dir ./causal_results
+
+Evaluate Qwen/Qwen3-8B (Non-Thinking Mode)
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run python run_causal_transfer.py \
+    --model_name Qwen/Qwen3-8B \
+    --is_qwen \
+    --n_samples 40 \
+    --top_k 15 \
+    --output_dir ./causal_results
+
+
+NOTE:
+FIRST RUN MISTRAL AND QWEN NON THINKING-MODE
+THEN, RUN QWEN THINKING MODE
