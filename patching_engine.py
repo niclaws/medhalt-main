@@ -32,7 +32,7 @@ class CausalMediationHarness:
         # Optimal layer mapping across 4 x 11GB GPUs
         max_mem = {0: "21GiB"}
 
-        print(f"[Harness Init] Loading model with device_map='auto' and max_memory={max_memory}...", datetime.now())
+        print(f"[Harness Init] Loading model with device_map='auto' and max_memory={max_mem}...", datetime.now())
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             torch_dtype=torch.float16,

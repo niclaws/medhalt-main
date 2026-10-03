@@ -83,8 +83,11 @@ def compute_task_circuit(
     print(f"\n[compute_task_circuit] Sweep finished in {time.time() - sweep_start:.2f}s.", datetime.now())
     print(f"[compute_task_circuit] Valid samples utilized: {valid_samples}/{total_samples}", datetime.now())
 
-    head_aie /= max(valid_samples, 1)
-    mlp_aie /= max(valid_samples, 1)
+    if valid_samples == 0:
+        raise RuntimeError("Circuit discovery produced zero valid samples; refusing to fabricate an all-zero circuit.")
+
+    head_aie /= valid_samples
+    mlp_aie /= valid_samples
 
     print(f"[compute_task_circuit] Head AIE -> min: {head_aie.min():.4f}, max: {head_aie.max():.4f}, mean: {head_aie.mean():.4f}", datetime.now())
     print(f"[compute_task_circuit] MLP AIE  -> min: {mlp_aie.min():.4f}, max: {mlp_aie.max():.4f}, mean: {mlp_aie.mean():.4f}", datetime.now())
@@ -263,13 +266,10 @@ def run_cross_task_experiment(
     for i, s_task in enumerate(task_names):
         for j, t_task in enumerate(task_names):
             print(f"\n--- Matrix Cell [{i},{j}]: Source='{s_task}' -> Target='{t_task}' ---", datetime.now())
-            if i == j:
-                transfer_matrix[i, j] = 1.0
-                print(f"[RESULT] {s_task} -> {t_task} = 1.0000 (Self-Transfer Identity)", datetime.now())
-            else:
-                transfer_score = evaluate_transfer(harness, circuits[s_task], tasks_data[t_task])
-                transfer_matrix[i, j] = transfer_score
-                print(f"[RESULT] {s_task} -> {t_task} Transfer Score: {transfer_score:.4f}", datetime.now())
+            # Measure every cell empirically, including the diagonal.
+            transfer_score = evaluate_transfer(harness, circuits[s_task], tasks_data[t_task])
+            transfer_matrix[i, j] = transfer_score
+            print(f"[RESULT] {s_task} -> {t_task} Transfer Score: {transfer_score:.4f}", datetime.now())
 
             # Jaccard overlap: |A & B| / |A | B|
             inter = len(circuit_label_sets[s_task] & circuit_label_sets[t_task])
