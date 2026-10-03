@@ -7,36 +7,38 @@ HF_REPO="damonsalvatore123/medhalt"
 
 mkdir -p /results/logs
 
-echo "=========================================="
-echo "Starting Mistral experiment"
-echo "Time: $(date)"
-echo "=========================================="
-
-python "$SCRIPT" \
-    --model_name mistralai/Mistral-7B-Instruct-v0.3 \
-    --n_samples 100 \
-    --top_k 20 \
-    --k_values 5 10 15 20 30 50 \
-    --denom_thresholds 0.0001 0.001 0.01 0.1 \
-    --bootstrap_samples 5000 \
-    --num_random_controls 20 \
-    --seed 42 \
-    --output_dir /results/mistral_7b_seed42 \
-    --hf_repo_id "$HF_REPO" \
-    2>&1 | tee /results/logs/mistral_7b_seed42.log
-
-MISTRAL_STATUS=${PIPESTATUS[0]}
-
-if [ "$MISTRAL_STATUS" -eq 0 ]; then
-    echo "Mistral completed successfully."
-else
-    echo "Mistral FAILED with exit code $MISTRAL_STATUS."
-    echo "Continuing to Qwen anyway."
-fi
+#echo "=========================================="
+#echo "Starting Mistral experiment (Vectorized)"
+#echo "Time: $(date)"
+#echo "=========================================="
+#
+#python "$SCRIPT" \
+#    --model_name mistralai/Mistral-7B-Instruct-v0.3 \
+#    --n_samples 100 \
+#    --top_k 20 \
+#    --head_batch_size 32 \
+#    --k_values 5 10 15 20 30 50 \
+#    --denom_thresholds 0.0001 0.001 0.01 0.1 \
+#    --bootstrap_samples 2000 \
+#    --num_random_controls 20 \
+#    --control_samples 50 \
+#    --seed 42 \
+#    --output_dir /results/mistral_7b_seed42 \
+#    --hf_repo_id "$HF_REPO" \
+#    2>&1 | tee /results/logs/mistral_7b_seed42.log
+#
+#MISTRAL_STATUS=${PIPESTATUS[0]}
+#
+#if [ "$MISTRAL_STATUS" -eq 0 ]; then
+#    echo "Mistral completed successfully."
+#else
+#    echo "Mistral FAILED with exit code $MISTRAL_STATUS."
+#    echo "Continuing to Qwen anyway."
+#fi
 
 echo
 echo "=========================================="
-echo "Starting Qwen experiment"
+echo "Starting Qwen experiment (Vectorized)"
 echo "Time: $(date)"
 echo "=========================================="
 
@@ -45,10 +47,12 @@ python "$SCRIPT" \
     --is_qwen \
     --n_samples 100 \
     --top_k 20 \
+    --head_batch_size 32 \
     --k_values 5 10 15 20 30 50 \
     --denom_thresholds 0.0001 0.001 0.01 0.1 \
-    --bootstrap_samples 5000 \
+    --bootstrap_samples 2000 \
     --num_random_controls 20 \
+    --control_samples 50 \
     --seed 42 \
     --output_dir /results/qwen3_8b_seed42 \
     --hf_repo_id "$HF_REPO" \
@@ -67,9 +71,5 @@ echo "=========================================="
 echo "Experiments finished"
 echo "Time: $(date)"
 echo "=========================================="
-echo "Mistral exit code: $MISTRAL_STATUS"
+#echo "Mistral exit code: $MISTRAL_STATUS"
 echo "Qwen exit code:    $QWEN_STATUS"
-echo
-echo "Logs:"
-echo "  /results/logs/mistral_7b_seed42.log"
-echo "  /results/logs/qwen3_8b_seed42.log"
