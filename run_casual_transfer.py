@@ -2085,5 +2085,5 @@ def save_results():
     print(f"Uploaded results to: https://huggingface.co/datasets/{repo_id}")
 
 if __name__ == "__main__":
-    # main()
+    main()
     save_results()
