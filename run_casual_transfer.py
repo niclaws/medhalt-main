@@ -66,6 +66,42 @@ class MedHALTPairBuilder:
 
         return tokens[0] if tokens else None
 
+    def get_first_distinct_url_token_pair(
+            self,
+            clean_pmid: str,
+            corrupt_pmid: str,
+    ):
+        clean_tokens = self.tokenizer.encode(
+            str(clean_pmid).strip(),
+            add_special_tokens=False,
+        )
+
+        corrupt_tokens = self.tokenizer.encode(
+            str(corrupt_pmid).strip(),
+            add_special_tokens=False,
+        )
+
+        if not clean_tokens or not corrupt_tokens:
+            return None
+
+        min_len = min(
+            len(clean_tokens),
+            len(corrupt_tokens),
+        )
+
+        for position in range(min_len):
+            if clean_tokens[position] != corrupt_tokens[position]:
+                return {
+                    "common_prefix_ids": clean_tokens[:position],
+                    "target_id": clean_tokens[position],
+                    "halluc_id": corrupt_tokens[position],
+                    "position": position,
+                    "clean_tokens": clean_tokens,
+                    "corrupt_tokens": corrupt_tokens,
+                }
+
+        return None
+
     def create_pair(self, clean_txt: str, corrupt_txt: str, target_str: str, halluc_str: str) -> Optional[Dict]:
         t_id = self.encode_single_token(target_str)
         h_id = self.encode_single_token(halluc_str)
@@ -198,30 +234,52 @@ class MedHALTPairBuilder:
 
                     clean_sample = real_samples[i]
 
-                    clean_pmid = str(clean_sample["PMID"]).strip()
-                    clean_title = str(clean_sample["Title"]).strip()
+                    clean_pmid = str(
+                        clean_sample["PMID"]
+                    ).strip()
 
-                    target_id = self.encode_url_token(clean_pmid)
+                    clean_title = str(
+                        clean_sample["Title"]
+                    ).strip()
 
-                    if target_id is None:
+                    if not clean_pmid or not clean_title:
                         continue
 
-                    # Search for a second paper whose first PMID token differs.
                     for j in range(i + 1, len(real_samples)):
 
                         corrupt_sample = real_samples[j]
 
-                        corrupt_pmid = str(corrupt_sample["PMID"]).strip()
-                        corrupt_title = str(corrupt_sample["Title"]).strip()
+                        corrupt_pmid = str(
+                            corrupt_sample["PMID"]
+                        ).strip()
 
-                        halluc_id = self.encode_url_token(corrupt_pmid)
+                        corrupt_title = str(
+                            corrupt_sample["Title"]
+                        ).strip()
 
-                        if halluc_id is None:
+                        if not corrupt_pmid or not corrupt_title:
                             continue
 
-                        # Required for logit-difference measurement.
-                        if target_id == halluc_id:
+                        divergence = (
+                            self.get_first_distinct_url_token_pair(
+                                clean_pmid,
+                                corrupt_pmid,
+                            )
+                        )
+
+                        if divergence is None:
                             continue
+
+                        target_id = divergence["target_id"]
+                        halluc_id = divergence["halluc_id"]
+
+                        common_prefix_ids = (
+                            divergence["common_prefix_ids"]
+                        )
+
+                        differing_position = (
+                            divergence["position"]
+                        )
 
                         clean = (
                             f"Article Title: {clean_title}\n"
@@ -240,31 +298,76 @@ class MedHALTPairBuilder:
 
                         clean_ids = self.tokenizer(
                             clean_prompt,
-                            return_tensors="pt"
+                            return_tensors="pt",
                         ).input_ids
 
                         corrupt_ids = self.tokenizer(
                             corrupt_prompt,
-                            return_tensors="pt"
+                            return_tensors="pt",
                         ).input_ids
+
+                        # Append the token prefix that both PMIDs share.
+                        # The next-token prediction is then made exactly
+                        # at the first token where the PMIDs differ.
+                        if common_prefix_ids:
+                            shared_prefix = torch.tensor(
+                                [common_prefix_ids],
+                                dtype=clean_ids.dtype,
+                            )
+
+                            clean_ids = torch.cat(
+                                [
+                                    clean_ids,
+                                    shared_prefix,
+                                ],
+                                dim=1,
+                            )
+
+                            corrupt_ids = torch.cat(
+                                [
+                                    corrupt_ids,
+                                    shared_prefix,
+                                ],
+                                dim=1,
+                            )
 
                         pair = {
                             "clean_ids": clean_ids,
                             "corrupt_ids": corrupt_ids,
+
                             "target_id": target_id,
                             "halluc_id": halluc_id,
+
+                            "target_text": clean_pmid,
+                            "halluc_text": corrupt_pmid,
+
+                            "sample_id": (
+                                f"{clean_pmid}"
+                                f"__vs__"
+                                f"{corrupt_pmid}"
+                            ),
+
+                            "clean_ref": clean_pmid,
+                            "corrupt_ref": corrupt_pmid,
+
+                            "pmid_token_position":
+                                differing_position,
+
+                            "shared_prefix_length":
+                                len(common_prefix_ids),
                         }
 
                         pairs.append(pair)
 
                         print(
                             f"[Title2URL] Pair #{len(pairs)} | "
-                            f"target PMID={clean_pmid}, "
-                            f"token={target_id}, "
-                            f"decoded={repr(self.tokenizer.decode([target_id]))} | "
-                            f"corrupt PMID={corrupt_pmid}, "
-                            f"token={halluc_id}, "
-                            f"decoded={repr(self.tokenizer.decode([halluc_id]))}"
+                            f"{clean_pmid} vs {corrupt_pmid} | "
+                            f"divergence_pos={differing_position} | "
+                            f"shared_prefix={common_prefix_ids} | "
+                            f"target={target_id} "
+                            f"{repr(self.tokenizer.decode([target_id]))} | "
+                            f"halluc={halluc_id} "
+                            f"{repr(self.tokenizer.decode([halluc_id]))}"
                         )
 
                         break
@@ -1959,7 +2062,7 @@ def save_results():
     from huggingface_hub import HfApi, create_repo
 
     repo_id = "damonsalvatore123/medhalt"
-    results_dir = "/root/causal_results_test"
+    results_dir = "/root/causal_results"
 
     # Create the repository if it doesn't already exist
     create_repo(
@@ -1982,5 +2085,5 @@ def save_results():
     print(f"Uploaded results to: https://huggingface.co/datasets/{repo_id}")
 
 if __name__ == "__main__":
-    main()
+    # main()
     save_results()
