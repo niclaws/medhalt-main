@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 
+
 def now():
     return datetime.now(IST)
 
@@ -19,11 +20,12 @@ def now():
 # 1. Circuit Discovery (Vectorized AIE Sweeps)
 # =====================================================================
 
+
 def compute_task_circuit(
-        harness: CausalMediationHarness,
-        dataset_samples: List[Dict],
-        top_k: int = 10,
-        head_batch_size: int = 32
+    harness: CausalMediationHarness,
+    dataset_samples: List[Dict],
+    top_k: int = 10,
+    head_batch_size: int = 32,
 ) -> Dict[str, object]:
     """
     Calculates Average Indirect Effect (AIE) across all Attention Heads
@@ -39,9 +41,15 @@ def compute_task_circuit(
     total_samples = len(dataset_samples)
     device = harness.model.device
 
-    print(f"\n[compute_task_circuit] Starting Vectorized AIE sweep on {total_samples} samples.", now())
-    print(f"[compute_task_circuit] Dimensions: {num_layers} layers x {num_heads} heads + {num_layers} MLPs "
-          f"-> {num_layers + num_layers} batched passes per sample.", now())
+    print(
+        f"\n[compute_task_circuit] Starting Vectorized AIE sweep on {total_samples} samples.",
+        now(),
+    )
+    print(
+        f"[compute_task_circuit] Dimensions: {num_layers} layers x {num_heads} heads + {num_layers} MLPs "
+        f"-> {num_layers + num_layers} batched passes per sample.",
+        now(),
+    )
 
     sweep_start = time.time()
 
@@ -79,10 +87,16 @@ def compute_task_circuit(
 
         elapsed = time.time() - sample_start
         if (idx + 1) % 5 == 0 or (idx + 1) == total_samples:
-            print(f"[compute_task_circuit] Sample #{idx+1}/{total_samples} complete in {elapsed:.2f}s | "
-                  f"Cumulative Valid: {valid_samples}", now())
+            print(
+                f"[compute_task_circuit] Sample #{idx+1}/{total_samples} complete in {elapsed:.2f}s | "
+                f"Cumulative Valid: {valid_samples}",
+                now(),
+            )
 
-    print(f"\n[compute_task_circuit] Sweep finished in {time.time() - sweep_start:.2f}s.", now())
+    print(
+        f"\n[compute_task_circuit] Sweep finished in {time.time() - sweep_start:.2f}s.",
+        now(),
+    )
 
     if valid_samples == 0:
         raise RuntimeError("Circuit discovery produced zero valid samples.")
@@ -111,7 +125,7 @@ def compute_task_circuit(
         "labels": circuit_labels,
         "scores": circuit_scores,
         "head_aie": head_aie,
-        "mlp_aie": mlp_aie
+        "mlp_aie": mlp_aie,
     }
 
 
@@ -119,10 +133,9 @@ def compute_task_circuit(
 # 2. Cross-Task Transfer Evaluation
 # =====================================================================
 
+
 def evaluate_transfer(
-        harness: CausalMediationHarness,
-        circuit: List[Tuple],
-        target_samples: List[Dict]
+    harness: CausalMediationHarness, circuit: List[Tuple], target_samples: List[Dict]
 ) -> float:
     total_transfer = 0.0
     valid_count = 0
@@ -156,9 +169,12 @@ def evaluate_transfer(
                             curr[:, -1, :] = a[:, -1, :]
                             return curr
                         return a
+
                     return hook_fn
 
-                h = harness.layers[layer_idx].mlp.register_forward_hook(make_mlp_hook(clean_act))
+                h = harness.layers[layer_idx].mlp.register_forward_hook(
+                    make_mlp_hook(clean_act)
+                )
                 handles.append(h)
 
             elif comp_type == "head":
@@ -167,20 +183,32 @@ def evaluate_transfer(
 
                 def make_head_hook(act, target_head):
                     def hook_fn(m, inp, outp):
-                        curr = outp[0].clone() if isinstance(outp, tuple) else outp.clone()
+                        curr = (
+                            outp[0].clone() if isinstance(outp, tuple) else outp.clone()
+                        )
                         B, S, hidden = curr.shape
                         cr = curr.view(B, S, harness.num_heads, harness.head_dim)
                         ca = act.to(curr.device).view(
-                            act.shape[0], act.shape[1], harness.num_heads, harness.head_dim
+                            act.shape[0],
+                            act.shape[1],
+                            harness.num_heads,
+                            harness.head_dim,
                         )
                         if cr.shape[1] != ca.shape[1]:
                             cr[:, -1, target_head, :] = ca[:, -1, target_head, :]
                         else:
                             cr[:, :, target_head, :] = ca[:, :, target_head, :]
-                        return (cr.view_as(curr),) + outp[1:] if isinstance(outp, tuple) else cr.view_as(curr)
+                        return (
+                            (cr.view_as(curr),) + outp[1:]
+                            if isinstance(outp, tuple)
+                            else cr.view_as(curr)
+                        )
+
                     return hook_fn
 
-                h = harness.layers[layer_idx].self_attn.register_forward_hook(make_head_hook(clean_act, h_idx))
+                h = harness.layers[layer_idx].self_attn.register_forward_hook(
+                    make_head_hook(clean_act, h_idx)
+                )
                 handles.append(h)
 
         with torch.inference_mode():
@@ -203,14 +231,18 @@ def evaluate_transfer(
 # 3. Main Experiment Orchestrator
 # =====================================================================
 
+
 def run_cross_task_experiment(
-        model_name: str,
-        tasks_data: Dict[str, List[Dict]],
-        is_qwen: bool = False,
-        top_k: int = 15
+    model_name: str,
+    tasks_data: Dict[str, List[Dict]],
+    is_qwen: bool = False,
+    top_k: int = 15,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     print("=" * 70)
-    print(f"RUNNING EXPERIMENT: Model={model_name} | QwenMode={is_qwen} | TopK={top_k}", now())
+    print(
+        f"RUNNING EXPERIMENT: Model={model_name} | QwenMode={is_qwen} | TopK={top_k}",
+        now(),
+    )
     print("=" * 70)
 
     harness = CausalMediationHarness(model_name, is_qwen=is_qwen)
@@ -237,14 +269,20 @@ def run_cross_task_experiment(
 
     for i, s_task in enumerate(task_names):
         for j, t_task in enumerate(task_names):
-            transfer_score = evaluate_transfer(harness, circuits[s_task], tasks_data[t_task])
+            transfer_score = evaluate_transfer(
+                harness, circuits[s_task], tasks_data[t_task]
+            )
             transfer_matrix[i, j] = transfer_score
 
             inter = len(circuit_label_sets[s_task] & circuit_label_sets[t_task])
             union = len(circuit_label_sets[s_task] | circuit_label_sets[t_task])
             jaccard_matrix[i, j] = inter / max(union, 1)
 
-    df_transfer = pd.DataFrame(transfer_matrix, index=task_names, columns=task_names).round(4)
-    df_jaccard = pd.DataFrame(jaccard_matrix, index=task_names, columns=task_names).round(4)
+    df_transfer = pd.DataFrame(
+        transfer_matrix, index=task_names, columns=task_names
+    ).round(4)
+    df_jaccard = pd.DataFrame(
+        jaccard_matrix, index=task_names, columns=task_names
+    ).round(4)
 
     return df_transfer, df_jaccard

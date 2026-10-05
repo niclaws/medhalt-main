@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 
+
 def now():
     return datetime.now(IST)
 
@@ -27,6 +28,7 @@ def now():
 # =====================================================================
 # 1. Contrastive Dataset Pair Builder
 # =====================================================================
+
 
 class MedHALTPairBuilder:
     VALID_OPTION_LABELS = {"A", "B", "C", "D", "E"}
@@ -121,8 +123,12 @@ class MedHALTPairBuilder:
         return tokens[0] if tokens else None
 
     def get_first_distinct_url_token_pair(self, clean_pmid: str, corrupt_pmid: str):
-        clean_tokens = self.tokenizer.encode(str(clean_pmid).strip(), add_special_tokens=False)
-        corrupt_tokens = self.tokenizer.encode(str(corrupt_pmid).strip(), add_special_tokens=False)
+        clean_tokens = self.tokenizer.encode(
+            str(clean_pmid).strip(), add_special_tokens=False
+        )
+        corrupt_tokens = self.tokenizer.encode(
+            str(corrupt_pmid).strip(), add_special_tokens=False
+        )
         if not clean_tokens or not corrupt_tokens:
             return None
 
@@ -155,7 +161,9 @@ class MedHALTPairBuilder:
         corrupt_prompt = self.format_prompt(corrupt_txt, self.model_type)
         pair = {
             "clean_ids": self.tokenizer(clean_prompt, return_tensors="pt").input_ids,
-            "corrupt_ids": self.tokenizer(corrupt_prompt, return_tensors="pt").input_ids,
+            "corrupt_ids": self.tokenizer(
+                corrupt_prompt, return_tensors="pt"
+            ).input_ids,
             "target_id": t_id,
             "halluc_id": h_id,
             "target_text": str(target_str),
@@ -171,7 +179,9 @@ class MedHALTPairBuilder:
         n_samples: int = 50,
         task_seed: Optional[int] = None,
     ) -> List[Dict]:
-        raw_samples = list(get_samples(dataset_name=task_name, shots=0, prompt_version="v0"))
+        raw_samples = list(
+            get_samples(dataset_name=task_name, shots=0, prompt_version="v0")
+        )
         seed = self.seed if task_seed is None else task_seed
         rng = random.Random(seed)
         rng.shuffle(raw_samples)
@@ -179,7 +189,8 @@ class MedHALTPairBuilder:
 
         if task_name in {"pmid2title", "title2pub"}:
             real_samples = [
-                s for s in raw_samples
+                s
+                for s in raw_samples
                 if str(s.get("pubmed_data_type", "")).lower() == "real_data"
                 and str(s.get("is_paper_exists", "")).lower() == "yes"
                 and pd.notna(s.get("PMID"))
@@ -213,7 +224,11 @@ class MedHALTPairBuilder:
                         halluc_word = corrupt_title.split()[0]
                         target_id = self.encode_single_token(target_word)
                         halluc_id = self.encode_single_token(halluc_word)
-                        if target_id is None or halluc_id is None or target_id == halluc_id:
+                        if (
+                            target_id is None
+                            or halluc_id is None
+                            or target_id == halluc_id
+                        ):
                             continue
 
                         clean = f"Provide the title of PubMed paper with PMID {clean_pmid}:\nTitle:"
@@ -233,7 +248,9 @@ class MedHALTPairBuilder:
                             continue
 
                     else:
-                        divergence = self.get_first_distinct_url_token_pair(clean_pmid, corrupt_pmid)
+                        divergence = self.get_first_distinct_url_token_pair(
+                            clean_pmid, corrupt_pmid
+                        )
                         if divergence is None:
                             continue
 
@@ -251,10 +268,12 @@ class MedHALTPairBuilder:
                         )
 
                         clean_ids = self.tokenizer(
-                            self.format_prompt(clean, self.model_type), return_tensors="pt"
+                            self.format_prompt(clean, self.model_type),
+                            return_tensors="pt",
                         ).input_ids
                         corrupt_ids = self.tokenizer(
-                            self.format_prompt(corrupt, self.model_type), return_tensors="pt"
+                            self.format_prompt(corrupt, self.model_type),
+                            return_tensors="pt",
                         ).input_ids
 
                         if common_prefix_ids:
@@ -291,14 +310,18 @@ class MedHALTPairBuilder:
 
             sample_id = str(sample.get("id", f"{task_name}_{sample_idx}"))
             q = sample.get("question", "")
-            rendered_options, option_values = self.render_lettered_options(sample.get("options", ""))
+            rendered_options, option_values = self.render_lettered_options(
+                sample.get("options", "")
+            )
 
             if not option_values:
                 continue
 
             if task_name == "FCT":
                 correct = self.option_index_to_label(sample.get("correct_index"))
-                suggested_wrong = self.option_index_to_label(sample.get("student_index"))
+                suggested_wrong = self.option_index_to_label(
+                    sample.get("student_index")
+                )
 
                 if (
                     correct is None
@@ -349,12 +372,17 @@ class MedHALTPairBuilder:
                 alternate_index = None
                 for field in ("student_index", "distractor_index"):
                     value = sample.get(field)
-                    if value is not None and not (isinstance(value, float) and np.isnan(value)):
+                    if value is not None and not (
+                        isinstance(value, float) and np.isnan(value)
+                    ):
                         try:
                             candidate = int(value)
                         except (TypeError, ValueError):
                             continue
-                        if 0 <= candidate < len(option_values) and candidate != correct_index:
+                        if (
+                            0 <= candidate < len(option_values)
+                            and candidate != correct_index
+                        ):
                             alternate_index = candidate
                             break
 
@@ -402,10 +430,13 @@ class MedHALTPairBuilder:
 # 2. Optimized Causal Engine with Extraction & Intervention Hooks
 # =====================================================================
 
+
 class CausalEngine:
     def __init__(self, model_name: str, is_qwen: bool = False):
         print(f"\n[Engine] Loading {model_name}...", now())
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left", trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, padding_side="left", trust_remote_code=True
+        )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -417,7 +448,7 @@ class CausalEngine:
             torch_dtype=dtype,
             device_map="auto",
             # max_memory=max_mem,
-            trust_remote_code=True
+            trust_remote_code=True,
         )
         self.model.eval()
 
@@ -430,33 +461,47 @@ class CausalEngine:
             or self.model.config.hidden_size // self.num_heads
         )
 
-        print(f"[Engine] Model Loaded. Layers: {self.num_layers}, Heads: {self.num_heads}, "
-              f"head_dim={self.head_dim}, hidden_size={self.model.config.hidden_size}", now())
+        print(
+            f"[Engine] Model Loaded. Layers: {self.num_layers}, Heads: {self.num_heads}, "
+            f"head_dim={self.head_dim}, hidden_size={self.model.config.hidden_size}",
+            now(),
+        )
 
-    def get_logit_diff(self, input_ids: torch.Tensor, target_id: int, halluc_id: int) -> float:
+    def get_logit_diff(
+        self, input_ids: torch.Tensor, target_id: int, halluc_id: int
+    ) -> float:
         with torch.inference_mode():
             outputs = self.model(input_ids.to(self.model.device))
             last_logits = outputs.logits[0, -1, :]
             return (last_logits[target_id] - last_logits[halluc_id]).item()
 
-    def cache_clean_activations(self, clean_ids: torch.Tensor) -> Tuple[
-        Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
+    def cache_clean_activations(
+        self, clean_ids: torch.Tensor
+    ) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
         head_cache = {}
         mlp_cache = {}
         hooks = []
 
         def get_attn_hook(l):
             def hook(module, inp, outp):
-                head_cache[l] = outp[0].detach() if isinstance(outp, tuple) else outp.detach()
+                head_cache[l] = (
+                    outp[0].detach() if isinstance(outp, tuple) else outp.detach()
+                )
+
             return hook
 
         def get_mlp_hook(l):
             def hook(module, inp, outp):
-                mlp_cache[l] = outp[0].detach() if isinstance(outp, tuple) else outp.detach()
+                mlp_cache[l] = (
+                    outp[0].detach() if isinstance(outp, tuple) else outp.detach()
+                )
+
             return hook
 
         for l in range(self.num_layers):
-            hooks.append(self.layers[l].self_attn.register_forward_hook(get_attn_hook(l)))
+            hooks.append(
+                self.layers[l].self_attn.register_forward_hook(get_attn_hook(l))
+            )
             hooks.append(self.layers[l].mlp.register_forward_hook(get_mlp_hook(l)))
 
         with torch.inference_mode():
@@ -468,9 +513,7 @@ class CausalEngine:
         return head_cache, mlp_cache
 
     def extract_task_representations(
-        self,
-        samples: List[Dict],
-        max_samples: int = 50
+        self, samples: List[Dict], max_samples: int = 50
     ) -> Dict[int, torch.Tensor]:
         """Extracts token decision representations across all layers for CKA."""
         layer_reps = {l: [] for l in range(self.num_layers)}
@@ -487,6 +530,7 @@ class CausalEngine:
                     act = outp[0] if isinstance(outp, tuple) else outp
                     # Target final decision token representation
                     sample_cache[layer_i] = act[:, -1, :].detach().cpu()
+
                 return hook_fn
 
             for l in range(self.num_layers):
@@ -510,7 +554,7 @@ class CausalEngine:
         halluc_id: int,
         layer_idx: int,
         clean_act: torch.Tensor,
-        chunk_size: int = 32
+        chunk_size: int = 32,
     ) -> np.ndarray:
         target_diffs = np.zeros(self.num_heads, dtype=np.float32)
         total_heads = self.num_heads
@@ -534,18 +578,26 @@ class CausalEngine:
 
                 for b_idx, h_idx in enumerate(active_heads):
                     if S != Sc:
-                        curr_reshaped[b_idx, -1, h_idx, :] = clean_reshaped[0, -1, h_idx, :]
+                        curr_reshaped[b_idx, -1, h_idx, :] = clean_reshaped[
+                            0, -1, h_idx, :
+                        ]
                     else:
-                        curr_reshaped[b_idx, :, h_idx, :] = clean_reshaped[0, :, h_idx, :]
+                        curr_reshaped[b_idx, :, h_idx, :] = clean_reshaped[
+                            0, :, h_idx, :
+                        ]
 
                 patched = curr_reshaped.reshape(B, S, hidden)
                 return (patched,) + outp[1:] if isinstance(outp, tuple) else patched
 
-            handle = self.layers[layer_idx].self_attn.register_forward_hook(batched_patch_hook)
+            handle = self.layers[layer_idx].self_attn.register_forward_hook(
+                batched_patch_hook
+            )
             with torch.inference_mode():
                 outputs = self.model(batched_corrupt)
                 logits = outputs.logits[:, -1, :]
-                diffs = (logits[:, target_id] - logits[:, halluc_id]).float().cpu().numpy()
+                diffs = (
+                    (logits[:, target_id] - logits[:, halluc_id]).float().cpu().numpy()
+                )
 
             handle.remove()
             target_diffs[start_idx:end_idx] = diffs
@@ -553,13 +605,13 @@ class CausalEngine:
         return target_diffs
 
     def patch_single_component(
-            self,
-            corrupt_ids: torch.Tensor,
-            target_id: int,
-            halluc_id: int,
-            comp_type: str,
-            layer_idx: int,
-            clean_act: torch.Tensor
+        self,
+        corrupt_ids: torch.Tensor,
+        target_id: int,
+        halluc_id: int,
+        comp_type: str,
+        layer_idx: int,
+        clean_act: torch.Tensor,
     ) -> float:
         def hook_fn(module, inp, outp):
             if clean_act.shape[1] != outp.shape[1]:
@@ -581,6 +633,7 @@ class CausalEngine:
 # =====================================================================
 # 3. Discovery & Evaluation Logic
 # =====================================================================
+
 
 def bootstrap_mean_ci(values, n_bootstrap=2000, confidence=0.95, seed=42):
     arr = np.asarray(values, dtype=float)
@@ -608,25 +661,29 @@ def rank_components(head_aie: np.ndarray, mlp_aie: np.ndarray) -> List[Dict]:
     for layer in range(num_layers):
         for head in range(num_heads):
             score = float(head_aie[layer, head])
-            ranked.append({
-                "component": ("head", layer, head),
-                "label": f"L{layer}H{head}",
-                "component_type": "head",
+            ranked.append(
+                {
+                    "component": ("head", layer, head),
+                    "label": f"L{layer}H{head}",
+                    "component_type": "head",
+                    "layer": layer,
+                    "head": head,
+                    "aie": score,
+                    "abs_aie": abs(score),
+                }
+            )
+        score = float(mlp_aie[layer])
+        ranked.append(
+            {
+                "component": ("mlp", layer, None),
+                "label": f"L{layer}MLP",
+                "component_type": "mlp",
                 "layer": layer,
-                "head": head,
+                "head": None,
                 "aie": score,
                 "abs_aie": abs(score),
-            })
-        score = float(mlp_aie[layer])
-        ranked.append({
-            "component": ("mlp", layer, None),
-            "label": f"L{layer}MLP",
-            "component_type": "mlp",
-            "layer": layer,
-            "head": None,
-            "aie": score,
-            "abs_aie": abs(score),
-        })
+            }
+        )
 
     ranked.sort(key=lambda row: row["abs_aie"], reverse=True)
     for rank, row in enumerate(ranked, 1):
@@ -666,7 +723,8 @@ def summarize_transfer_rows(
     seed: int = 42,
 ) -> Dict[str, object]:
     usable = [
-        row for row in rows
+        row
+        for row in rows
         if row.get("patched", False)
         and abs(float(row["denominator"])) >= threshold
         and np.isfinite(float(row["normalized_transfer"]))
@@ -730,16 +788,21 @@ def discover_circuit(
     engine: CausalEngine,
     dataset: List[Dict],
     min_denom: float = 1e-4,
-    head_batch_size: int = 32
+    head_batch_size: int = 32,
 ) -> Dict[str, object]:
     sample_rows = []
     per_sample_head = []
     per_sample_mlp = []
     valid_denoms = []
 
-    print(f"\n[Discovery] Starting vectorized discovery on {len(dataset)} samples...", now())
+    print(
+        f"\n[Discovery] Starting vectorized discovery on {len(dataset)} samples...",
+        now(),
+    )
 
-    for idx, sample in enumerate(tqdm(dataset, desc="Scanning Components", leave=False)):
+    for idx, sample in enumerate(
+        tqdm(dataset, desc="Scanning Components", leave=False)
+    ):
         clean_ids = sample["clean_ids"]
         corrupt_ids = sample["corrupt_ids"]
         t_id = sample["target_id"]
@@ -773,7 +836,12 @@ def discover_circuit(
 
         for layer in range(engine.num_layers):
             layer_diffs = engine.patch_heads_layer_batched(
-                corrupt_ids, t_id, h_id, layer, head_cache[layer], chunk_size=head_batch_size
+                corrupt_ids,
+                t_id,
+                h_id,
+                layer,
+                head_cache[layer],
+                chunk_size=head_batch_size,
             )
             head_effect[layer, :] = (layer_diffs - d_corrupt) / denom
 
@@ -815,11 +883,15 @@ def discover_circuit(
         "mean_abs_mlp_aie": float(np.mean(np.abs(mlp_aie))),
         "max_abs_mlp_aie": float(np.max(np.abs(mlp_aie))),
         "mean_clean_corrupt_gap": float(np.mean(denom_array)),
-        "std_clean_corrupt_gap": float(np.std(denom_array, ddof=1)) if valid_count > 1 else 0.0,
+        "std_clean_corrupt_gap": (
+            float(np.std(denom_array, ddof=1)) if valid_count > 1 else 0.0
+        ),
     }
 
 
-def ranking_at_threshold(discovery_result: Dict, threshold: float) -> Optional[List[Dict]]:
+def ranking_at_threshold(
+    discovery_result: Dict, threshold: float
+) -> Optional[List[Dict]]:
     denoms = discovery_result["valid_denominators"]
     mask = np.abs(denoms) >= threshold
     if not np.any(mask):
@@ -837,7 +909,9 @@ def evaluate_circuit_transfer(
 ) -> Dict[str, object]:
     per_sample_rows = []
 
-    for idx, sample in enumerate(tqdm(target_dataset, desc="Evaluating Transfer", leave=False)):
+    for idx, sample in enumerate(
+        tqdm(target_dataset, desc="Evaluating Transfer", leave=False)
+    ):
         clean_ids = sample["clean_ids"]
         corrupt_ids = sample["corrupt_ids"]
         t_id = sample["target_id"]
@@ -861,13 +935,15 @@ def evaluate_circuit_transfer(
         }
 
         if abs(denom) < min_denom:
-            per_sample_rows.append({
-                **base,
-                "patched": False,
-                "d_patched": np.nan,
-                "raw_restoration": np.nan,
-                "normalized_transfer": np.nan,
-            })
+            per_sample_rows.append(
+                {
+                    **base,
+                    "patched": False,
+                    "d_patched": np.nan,
+                    "raw_restoration": np.nan,
+                    "normalized_transfer": np.nan,
+                }
+            )
             continue
 
         head_cache, mlp_cache = engine.cache_clean_activations(clean_ids)
@@ -885,10 +961,13 @@ def evaluate_circuit_transfer(
                             curr[:, -1, :] = clean[:, -1, :]
                             return curr
                         return clean
+
                     return hook
 
                 handles.append(
-                    engine.layers[layer_idx].mlp.register_forward_hook(get_mlp_hook(act))
+                    engine.layers[layer_idx].mlp.register_forward_hook(
+                        get_mlp_hook(act)
+                    )
                 )
 
             elif comp_type == "head":
@@ -896,7 +975,9 @@ def evaluate_circuit_transfer(
 
                 def get_head_hook(a, target_h):
                     def hook(m, inp, outp):
-                        curr = outp[0].clone() if isinstance(outp, tuple) else outp.clone()
+                        curr = (
+                            outp[0].clone() if isinstance(outp, tuple) else outp.clone()
+                        )
                         B, S, hidden = curr.shape
                         clean = a.to(curr.device)
                         Bc, Sc, clean_hidden = clean.shape
@@ -907,7 +988,12 @@ def evaluate_circuit_transfer(
                         else:
                             cr[:, :, target_h, :] = ca[:, :, target_h, :]
                         patched = cr.reshape(B, S, hidden)
-                        return (patched,) + outp[1:] if isinstance(outp, tuple) else patched
+                        return (
+                            (patched,) + outp[1:]
+                            if isinstance(outp, tuple)
+                            else patched
+                        )
+
                     return hook
 
                 handles.append(
@@ -927,13 +1013,15 @@ def evaluate_circuit_transfer(
 
         raw_restoration = d_patched - d_corrupt
         normalized_transfer = raw_restoration / denom
-        per_sample_rows.append({
-            **base,
-            "patched": True,
-            "d_patched": d_patched,
-            "raw_restoration": raw_restoration,
-            "normalized_transfer": normalized_transfer,
-        })
+        per_sample_rows.append(
+            {
+                **base,
+                "patched": True,
+                "d_patched": d_patched,
+                "raw_restoration": raw_restoration,
+                "normalized_transfer": normalized_transfer,
+            }
+        )
         del head_cache, mlp_cache
 
     return {"per_sample": per_sample_rows}
@@ -960,12 +1048,14 @@ def sample_layer_matched_random_circuit(universe, reference, rng):
     for ref in reference:
         comp_type, layer, _ = ref
         candidates = [
-            c for c in by_layer_type.get((layer, comp_type), [])
+            c
+            for c in by_layer_type.get((layer, comp_type), [])
             if c not in reference_set and c not in selected_set
         ]
         if not candidates:
             candidates = [
-                c for c in by_layer.get(layer, [])
+                c
+                for c in by_layer.get(layer, [])
                 if c not in reference_set and c not in selected_set
             ]
         if not candidates:
@@ -1010,7 +1100,9 @@ def save_heatmap(matrix, labels, title, path, fmt=".3f"):
     plt.close(fig)
 
 
-def save_cka_layer_matrix_plot(cka_matrix: np.ndarray, task_a: str, task_b: str, output_path: str):
+def save_cka_layer_matrix_plot(
+    cka_matrix: np.ndarray, task_a: str, task_b: str, output_path: str
+):
     fig, ax = plt.subplots(figsize=(9, 8))
     im = ax.imshow(cka_matrix, origin="lower", cmap="magma", vmin=0.0, vmax=1.0)
     ax.set_xlabel(f"Layers ({task_b})")
@@ -1080,7 +1172,9 @@ def save_k_sensitivity_plot(df, output_path):
     subset = df[df["source_task"] != df["target_task"]].copy()
     if subset.empty:
         return
-    grouped = subset.groupby("k", as_index=False)["mean_transfer"].mean().sort_values("k")
+    grouped = (
+        subset.groupby("k", as_index=False)["mean_transfer"].mean().sort_values("k")
+    )
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(grouped["k"], grouped["mean_transfer"], marker="o")
     ax.set_xlabel("Circuit size k")
@@ -1093,10 +1187,16 @@ def save_k_sensitivity_plot(df, output_path):
 
 
 def save_threshold_sensitivity_plot(df, primary_k, output_path):
-    subset = df[(df["k"] == primary_k) & (df["source_task"] != df["target_task"])].copy()
+    subset = df[
+        (df["k"] == primary_k) & (df["source_task"] != df["target_task"])
+    ].copy()
     if subset.empty:
         return
-    grouped = subset.groupby("denom_threshold", as_index=False)["mean_transfer"].mean().sort_values("denom_threshold")
+    grouped = (
+        subset.groupby("denom_threshold", as_index=False)["mean_transfer"]
+        .mean()
+        .sort_values("denom_threshold")
+    )
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(grouped["denom_threshold"], grouped["mean_transfer"], marker="o")
     ax.set_xscale("log")
@@ -1140,8 +1240,10 @@ def save_random_control_plot(df, control_type, output_path):
 # 4. Main Experiment Orchestrator
 # =====================================================================
 
+
 def upload_results_to_huggingface(output_dir, repo_id, path_in_repo, private=False):
     from huggingface_hub import HfApi, create_repo
+
     create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True, private=private)
     HfApi().upload_folder(
         folder_path=output_dir,
@@ -1150,17 +1252,32 @@ def upload_results_to_huggingface(output_dir, repo_id, path_in_repo, private=Fal
         path_in_repo=path_in_repo,
         commit_message=f"Upload MedHALT causal transfer results: {path_in_repo}",
     )
-    print(f"[HF] Uploaded to https://huggingface.co/datasets/{repo_id}/tree/main/{path_in_repo}")
+    print(
+        f"[HF] Uploaded to https://huggingface.co/datasets/{repo_id}/tree/main/{path_in_repo}"
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Med-HALT paper-grade causal transfer runner")
-    parser.add_argument("--model_name", type=str, default="mistralai/Mistral-7B-Instruct-v0.3")
+    parser = argparse.ArgumentParser(
+        description="Med-HALT paper-grade causal transfer runner"
+    )
+    parser.add_argument(
+        "--model_name", type=str, default="mistralai/Mistral-7B-Instruct-v0.3"
+    )
     parser.add_argument("--is_qwen", action="store_true")
     parser.add_argument("--n_samples", type=int, default=100)
-    parser.add_argument("--top_k", type=int, default=20, help="Primary/headline circuit size")
-    parser.add_argument("--k_values", nargs="+", type=int, default=[5, 10, 15, 20, 30, 50])
-    parser.add_argument("--head_batch_size", type=int, default=32, help="Chunk size for batched head sweep")
+    parser.add_argument(
+        "--top_k", type=int, default=20, help="Primary/headline circuit size"
+    )
+    parser.add_argument(
+        "--k_values", nargs="+", type=int, default=[5, 10, 15, 20, 30, 50]
+    )
+    parser.add_argument(
+        "--head_batch_size",
+        type=int,
+        default=32,
+        help="Chunk size for batched head sweep",
+    )
     parser.add_argument(
         "--denom_thresholds",
         nargs="+",
@@ -1172,8 +1289,18 @@ def main():
     parser.add_argument("--bootstrap_samples", type=int, default=5000)
     parser.add_argument("--bootstrap_confidence", type=float, default=0.95)
     parser.add_argument("--num_random_controls", type=int, default=20)
-    parser.add_argument("--control_samples", type=int, default=50, help="Sample subset size for random controls")
-    parser.add_argument("--cka_samples", type=int, default=50, help="Sample count per task for CKA analysis")
+    parser.add_argument(
+        "--control_samples",
+        type=int,
+        default=50,
+        help="Sample subset size for random controls",
+    )
+    parser.add_argument(
+        "--cka_samples",
+        type=int,
+        default=50,
+        help="Sample count per task for CKA analysis",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, default="./causal_results")
     parser.add_argument("--hf_repo_id", type=str, default="damonsalvatore123/medhalt")
@@ -1216,9 +1343,13 @@ def main():
     print(f"[INIT] Model family resolved to: '{model_type}'")
 
     engine = CausalEngine(args.model_name, is_qwen=(model_type == "qwen"))
-    pair_builder = MedHALTPairBuilder(engine.tokenizer, model_type=model_type, seed=args.seed)
+    pair_builder = MedHALTPairBuilder(
+        engine.tokenizer, model_type=model_type, seed=args.seed
+    )
     total_components = engine.num_layers * engine.num_heads + engine.num_layers
-    k_values = sorted({k for k in list(args.k_values) + [args.top_k] if 0 < k <= total_components})
+    k_values = sorted(
+        {k for k in list(args.k_values) + [args.top_k] if 0 < k <= total_components}
+    )
 
     print("\n--- Generating Med-HALT Contrastive Evaluation Sets ---", now())
     datasets = {}
@@ -1245,37 +1376,47 @@ def main():
             engine,
             datasets[task_key],
             min_denom=args.min_denom,
-            head_batch_size=args.head_batch_size
+            head_batch_size=args.head_batch_size,
         )
         discovery_results[task_key] = result
 
-        discovery_summary_rows.append({
-            "task": task_key,
-            "total_samples": result["total_count"],
-            "valid_samples": result["valid_count"],
-            "valid_fraction": result["valid_fraction"],
-            "mean_abs_head_aie": result["mean_abs_head_aie"],
-            "max_abs_head_aie": result["max_abs_head_aie"],
-            "mean_abs_mlp_aie": result["mean_abs_mlp_aie"],
-            "max_abs_mlp_aie": result["max_abs_mlp_aie"],
-            "mean_clean_corrupt_gap": result["mean_clean_corrupt_gap"],
-            "std_clean_corrupt_gap": result["std_clean_corrupt_gap"],
-        })
+        discovery_summary_rows.append(
+            {
+                "task": task_key,
+                "total_samples": result["total_count"],
+                "valid_samples": result["valid_count"],
+                "valid_fraction": result["valid_fraction"],
+                "mean_abs_head_aie": result["mean_abs_head_aie"],
+                "max_abs_head_aie": result["max_abs_head_aie"],
+                "mean_abs_mlp_aie": result["mean_abs_mlp_aie"],
+                "max_abs_mlp_aie": result["max_abs_mlp_aie"],
+                "mean_clean_corrupt_gap": result["mean_clean_corrupt_gap"],
+                "std_clean_corrupt_gap": result["std_clean_corrupt_gap"],
+            }
+        )
 
         for row in result["sample_rows"]:
             discovery_sample_rows.append({"task": task_key, **row})
 
         for row in result["ranking"]:
-            ranking_rows.append({"task": task_key, **{k: v for k, v in row.items() if k != "component"}})
+            ranking_rows.append(
+                {"task": task_key, **{k: v for k, v in row.items() if k != "component"}}
+            )
 
-        np.save(os.path.join(arrays_dir, f"{task_key}_head_aie.npy"), result["head_aie"])
+        np.save(
+            os.path.join(arrays_dir, f"{task_key}_head_aie.npy"), result["head_aie"]
+        )
         np.save(os.path.join(arrays_dir, f"{task_key}_mlp_aie.npy"), result["mlp_aie"])
 
         save_head_aie_heatmap(
-            result["head_aie"], task_key, os.path.join(plots_dir, f"{task_key}_head_aie.png")
+            result["head_aie"],
+            task_key,
+            os.path.join(plots_dir, f"{task_key}_head_aie.png"),
         )
         save_mlp_aie_plot(
-            result["mlp_aie"], task_key, os.path.join(plots_dir, f"{task_key}_mlp_aie.png")
+            result["mlp_aie"],
+            task_key,
+            os.path.join(plots_dir, f"{task_key}_mlp_aie.png"),
         )
         save_denominator_histogram(
             [r["denominator"] for r in result["sample_rows"]],
@@ -1283,7 +1424,9 @@ def main():
             os.path.join(plots_dir, f"{task_key}_denominator_histogram.png"),
         )
 
-        _, primary_labels, primary_scores = circuit_from_ranking(result["ranking"], args.top_k)
+        _, primary_labels, primary_scores = circuit_from_ranking(
+            result["ranking"], args.top_k
+        )
         save_top_circuit_plot(
             primary_labels,
             primary_scores,
@@ -1299,27 +1442,35 @@ def main():
             _, alt_labels, _ = circuit_from_ranking(alt_ranking, args.top_k)
             sim = circuit_similarity(base_labels, alt_labels)
             n_valid = int(np.sum(np.abs(result["valid_denominators"]) >= threshold))
-            discovery_threshold_rows.append({
-                "task": task_key,
-                "denom_threshold": threshold,
-                "valid_samples": n_valid,
-                "k": args.top_k,
-                "jaccard_to_base": sim["jaccard"],
-                "dice_to_base": sim["dice"],
-                "overlap_to_base": sim["overlap_coefficient"],
-            })
+            discovery_threshold_rows.append(
+                {
+                    "task": task_key,
+                    "denom_threshold": threshold,
+                    "valid_samples": n_valid,
+                    "k": args.top_k,
+                    "jaccard_to_base": sim["jaccard"],
+                    "dice_to_base": sim["dice"],
+                    "overlap_to_base": sim["overlap_coefficient"],
+                }
+            )
 
     pd.DataFrame(discovery_summary_rows).to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_discovery_metrics.csv"), index=False
+        os.path.join(args.output_dir, f"{clean_model_id}_discovery_metrics.csv"),
+        index=False,
     )
     pd.DataFrame(discovery_sample_rows).to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_discovery_sample_metrics.csv"), index=False
+        os.path.join(args.output_dir, f"{clean_model_id}_discovery_sample_metrics.csv"),
+        index=False,
     )
     pd.DataFrame(ranking_rows).to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_full_component_ranking.csv"), index=False
+        os.path.join(args.output_dir, f"{clean_model_id}_full_component_ranking.csv"),
+        index=False,
     )
     pd.DataFrame(discovery_threshold_rows).to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_discovery_threshold_sensitivity.csv"), index=False
+        os.path.join(
+            args.output_dir, f"{clean_model_id}_discovery_threshold_sensitivity.csv"
+        ),
+        index=False,
     )
 
     # ------------------------------------------------------------------
@@ -1336,7 +1487,9 @@ def main():
         circuits = {}
         labels_by_task = {}
         for task_key in task_keys:
-            circuit, labels, _ = circuit_from_ranking(discovery_results[task_key]["ranking"], k)
+            circuit, labels, _ = circuit_from_ranking(
+                discovery_results[task_key]["ranking"], k
+            )
             circuits[task_key] = circuit
             labels_by_task[task_key] = labels
 
@@ -1349,16 +1502,20 @@ def main():
                     datasets[target_task],
                     min_denom=args.min_denom,
                 )
-                similarity = circuit_similarity(labels_by_task[source_task], labels_by_task[target_task])
+                similarity = circuit_similarity(
+                    labels_by_task[source_task], labels_by_task[target_task]
+                )
 
                 for row in evaluation["per_sample"]:
-                    per_sample_rows.append({
-                        "model": args.model_name,
-                        "source_task": source_task,
-                        "target_task": target_task,
-                        "k": k,
-                        **row,
-                    })
+                    per_sample_rows.append(
+                        {
+                            "model": args.model_name,
+                            "source_task": source_task,
+                            "target_task": target_task,
+                            "k": k,
+                            **row,
+                        }
+                    )
 
                 stats = summarize_transfer_rows(
                     evaluation["per_sample"],
@@ -1367,21 +1524,23 @@ def main():
                     confidence=args.bootstrap_confidence,
                     seed=args.seed + 100000 * k + 100 * i + j,
                 )
-                aggregate_rows.append({
-                    "model": args.model_name,
-                    "source_task": source_task,
-                    "target_task": target_task,
-                    "k": k,
-                    "denom_threshold": args.min_denom,
-                    "mean_transfer": stats["mean"],
-                    "median_transfer": stats["median"],
-                    "std_transfer": stats["std"],
-                    "bootstrap_mean_ci_low": stats["bootstrap_mean_ci_low"],
-                    "bootstrap_mean_ci_high": stats["bootstrap_mean_ci_high"],
-                    "valid_samples": stats["valid_count"],
-                    "valid_fraction": stats["valid_fraction"],
-                    **similarity,
-                })
+                aggregate_rows.append(
+                    {
+                        "model": args.model_name,
+                        "source_task": source_task,
+                        "target_task": target_task,
+                        "k": k,
+                        "denom_threshold": args.min_denom,
+                        "mean_transfer": stats["mean"],
+                        "median_transfer": stats["median"],
+                        "std_transfer": stats["std"],
+                        "bootstrap_mean_ci_low": stats["bootstrap_mean_ci_low"],
+                        "bootstrap_mean_ci_high": stats["bootstrap_mean_ci_high"],
+                        "valid_samples": stats["valid_count"],
+                        "valid_fraction": stats["valid_fraction"],
+                        **similarity,
+                    }
+                )
 
                 if k == args.top_k:
                     primary_stats[(source_task, target_task)] = {**stats, **similarity}
@@ -1394,39 +1553,50 @@ def main():
                         confidence=args.bootstrap_confidence,
                         seed=args.seed + 700000 + 100000 * k + 100 * i + j,
                     )
-                    threshold_rows.append({
-                        "model": args.model_name,
-                        "source_task": source_task,
-                        "target_task": target_task,
-                        "k": k,
-                        "denom_threshold": threshold,
-                        "mean_transfer": tstats["mean"],
-                        "median_transfer": tstats["median"],
-                        "std_transfer": tstats["std"],
-                        "valid_samples": tstats["valid_count"],
-                        "valid_fraction": tstats["valid_fraction"],
-                    })
+                    threshold_rows.append(
+                        {
+                            "model": args.model_name,
+                            "source_task": source_task,
+                            "target_task": target_task,
+                            "k": k,
+                            "denom_threshold": threshold,
+                            "mean_transfer": tstats["mean"],
+                            "median_transfer": tstats["median"],
+                            "std_transfer": tstats["std"],
+                            "valid_samples": tstats["valid_count"],
+                            "valid_fraction": tstats["valid_fraction"],
+                        }
+                    )
 
     df_aggregate = pd.DataFrame(aggregate_rows)
     df_threshold = pd.DataFrame(threshold_rows)
     df_samples = pd.DataFrame(per_sample_rows)
     df_aggregate.to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_k_sensitivity_metrics.csv"), index=False
+        os.path.join(args.output_dir, f"{clean_model_id}_k_sensitivity_metrics.csv"),
+        index=False,
     )
     df_threshold.to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_denominator_threshold_sensitivity.csv"), index=False
+        os.path.join(
+            args.output_dir, f"{clean_model_id}_denominator_threshold_sensitivity.csv"
+        ),
+        index=False,
     )
     df_samples.to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_per_sample_transfer.csv"), index=False
+        os.path.join(args.output_dir, f"{clean_model_id}_per_sample_transfer.csv"),
+        index=False,
     )
 
     save_k_sensitivity_plot(df_aggregate, os.path.join(plots_dir, "k_sensitivity.png"))
     save_threshold_sensitivity_plot(
-        df_threshold, args.top_k, os.path.join(plots_dir, "denominator_threshold_sensitivity.png")
+        df_threshold,
+        args.top_k,
+        os.path.join(plots_dir, "denominator_threshold_sensitivity.png"),
     )
 
     matrix_names = ["mean_transfer", "median_transfer", "jaccard"]
-    matrices = {name: np.full((len(task_keys), len(task_keys)), np.nan) for name in matrix_names}
+    matrices = {
+        name: np.full((len(task_keys), len(task_keys)), np.nan) for name in matrix_names
+    }
 
     for i, source_task in enumerate(task_keys):
         for j, target_task in enumerate(task_keys):
@@ -1461,7 +1631,9 @@ def main():
 
             for target_idx, target_task in enumerate(task_keys):
                 observed = primary_stats[(source_task, target_task)]["mean"]
-                eval_subset = datasets[target_task][:min(len(datasets[target_task]), args.control_samples)]
+                eval_subset = datasets[target_task][
+                    : min(len(datasets[target_task]), args.control_samples)
+                ]
 
                 for control_type in ["uniform", "layer_matched"]:
                     random_means = []
@@ -1496,39 +1668,51 @@ def main():
                             seed=args.seed,
                         )
                         random_means.append(cstats["mean"])
-                        control_replicate_rows.append({
+                        control_replicate_rows.append(
+                            {
+                                "source_task": source_task,
+                                "target_task": target_task,
+                                "control_type": control_type,
+                                "replicate": replicate,
+                                "k": args.top_k,
+                                "mean_transfer": cstats["mean"],
+                            }
+                        )
+
+                    finite = np.asarray(
+                        [x for x in random_means if np.isfinite(x)], dtype=float
+                    )
+                    p_one, p_two = empirical_p_values(observed, random_means)
+                    random_mean = float(np.mean(finite)) if len(finite) else np.nan
+                    random_std = (
+                        float(np.std(finite, ddof=1)) if len(finite) > 1 else 0.0
+                    )
+                    control_summary_rows.append(
+                        {
                             "source_task": source_task,
                             "target_task": target_task,
                             "control_type": control_type,
-                            "replicate": replicate,
                             "k": args.top_k,
-                            "mean_transfer": cstats["mean"],
-                        })
-
-                    finite = np.asarray([x for x in random_means if np.isfinite(x)], dtype=float)
-                    p_one, p_two = empirical_p_values(observed, random_means)
-                    random_mean = float(np.mean(finite)) if len(finite) else np.nan
-                    random_std = float(np.std(finite, ddof=1)) if len(finite) > 1 else 0.0
-                    control_summary_rows.append({
-                        "source_task": source_task,
-                        "target_task": target_task,
-                        "control_type": control_type,
-                        "k": args.top_k,
-                        "observed_mean": observed,
-                        "random_mean": random_mean,
-                        "random_std": random_std,
-                        "empirical_p_one_sided": p_one,
-                        "empirical_p_two_sided_abs": p_two,
-                        "num_controls": int(len(finite)),
-                    })
+                            "observed_mean": observed,
+                            "random_mean": random_mean,
+                            "random_std": random_std,
+                            "empirical_p_one_sided": p_one,
+                            "empirical_p_two_sided_abs": p_two,
+                            "num_controls": int(len(finite)),
+                        }
+                    )
 
     df_control_reps = pd.DataFrame(control_replicate_rows)
     df_control_summary = pd.DataFrame(control_summary_rows)
     df_control_reps.to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_random_control_replicates.csv"), index=False
+        os.path.join(
+            args.output_dir, f"{clean_model_id}_random_control_replicates.csv"
+        ),
+        index=False,
     )
     df_control_summary.to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_random_control_summary.csv"), index=False
+        os.path.join(args.output_dir, f"{clean_model_id}_random_control_summary.csv"),
+        index=False,
     )
 
     # ------------------------------------------------------------------
@@ -1539,7 +1723,10 @@ def main():
     n_cka = args.cka_samples
 
     for task_key in task_keys:
-        print(f"[CKA] Extracting layer activations for {task_key} ({n_cka} samples)...", now())
+        print(
+            f"[CKA] Extracting layer activations for {task_key} ({n_cka} samples)...",
+            now(),
+        )
         task_reps[task_key] = engine.extract_task_representations(
             datasets[task_key], max_samples=n_cka
         )
@@ -1568,21 +1755,35 @@ def main():
                 task_reps[s_task][final_l], task_reps[t_task][final_l]
             )
 
-    df_macro_lin_cka = pd.DataFrame(macro_linear_cka, index=task_keys, columns=task_keys).round(4)
-    df_macro_rbf_cka = pd.DataFrame(macro_rbf_cka, index=task_keys, columns=task_keys).round(4)
-    df_final_lin_cka = pd.DataFrame(final_layer_linear_cka, index=task_keys, columns=task_keys).round(4)
+    df_macro_lin_cka = pd.DataFrame(
+        macro_linear_cka, index=task_keys, columns=task_keys
+    ).round(4)
+    df_macro_rbf_cka = pd.DataFrame(
+        macro_rbf_cka, index=task_keys, columns=task_keys
+    ).round(4)
+    df_final_lin_cka = pd.DataFrame(
+        final_layer_linear_cka, index=task_keys, columns=task_keys
+    ).round(4)
 
-    df_macro_lin_cka.to_csv(os.path.join(cka_dir, f"{clean_model_id}_mean_linear_cka.csv"))
+    df_macro_lin_cka.to_csv(
+        os.path.join(cka_dir, f"{clean_model_id}_mean_linear_cka.csv")
+    )
     df_macro_rbf_cka.to_csv(os.path.join(cka_dir, f"{clean_model_id}_mean_rbf_cka.csv"))
-    df_final_lin_cka.to_csv(os.path.join(cka_dir, f"{clean_model_id}_final_layer_linear_cka.csv"))
+    df_final_lin_cka.to_csv(
+        os.path.join(cka_dir, f"{clean_model_id}_final_layer_linear_cka.csv")
+    )
 
     save_heatmap(
-        macro_linear_cka, task_keys, "Macro Mean Linear CKA",
-        os.path.join(plots_dir, "macro_mean_linear_cka_heatmap.png")
+        macro_linear_cka,
+        task_keys,
+        "Macro Mean Linear CKA",
+        os.path.join(plots_dir, "macro_mean_linear_cka_heatmap.png"),
     )
     save_heatmap(
-        final_layer_linear_cka, task_keys, f"Final Layer (L{final_l}) Linear CKA",
-        os.path.join(plots_dir, "final_layer_linear_cka_heatmap.png")
+        final_layer_linear_cka,
+        task_keys,
+        f"Final Layer (L{final_l}) Linear CKA",
+        os.path.join(plots_dir, "final_layer_linear_cka_heatmap.png"),
     )
 
     # 2. Granular Layer-by-Layer CKA Matrices (Cross-Task Layer Dynamics)
@@ -1594,7 +1795,9 @@ def main():
             if i > j:
                 continue  # Symmetric cross-task inspection
 
-            full_layer_matrix = np.zeros((engine.num_layers, engine.num_layers), dtype=np.float32)
+            full_layer_matrix = np.zeros(
+                (engine.num_layers, engine.num_layers), dtype=np.float32
+            )
             for l_s in range(engine.num_layers):
                 for l_t in range(engine.num_layers):
                     rep_s = task_reps[s_task][l_s]
@@ -1602,44 +1805,62 @@ def main():
                     sim = CenteredKernelAlignment.linear_cka(rep_s, rep_t)
                     full_layer_matrix[l_s, l_t] = sim
                     if l_s == l_t:
-                        cka_layer_profile_rows.append({
-                            "source_task": s_task,
-                            "target_task": t_task,
-                            "layer": l_s,
-                            "linear_cka": sim
-                        })
+                        cka_layer_profile_rows.append(
+                            {
+                                "source_task": s_task,
+                                "target_task": t_task,
+                                "layer": l_s,
+                                "linear_cka": sim,
+                            }
+                        )
 
             np.save(
                 os.path.join(cka_dir, f"{s_task}_vs_{t_task}_layer_cka.npy"),
-                full_layer_matrix
+                full_layer_matrix,
             )
             save_cka_layer_matrix_plot(
                 full_layer_matrix,
                 s_task,
                 t_task,
-                os.path.join(plots_dir, f"layer_cka_{s_task}_vs_{t_task}.png")
+                os.path.join(plots_dir, f"layer_cka_{s_task}_vs_{t_task}.png"),
             )
 
     df_layer_profiles = pd.DataFrame(cka_layer_profile_rows)
-    df_layer_profiles.to_csv(os.path.join(cka_dir, f"{clean_model_id}_diagonal_layer_cka.csv"), index=False)
+    df_layer_profiles.to_csv(
+        os.path.join(cka_dir, f"{clean_model_id}_diagonal_layer_cka.csv"), index=False
+    )
 
     # 3. Layer CKA Trajectory Plot (Reasoning vs Retrieval Cross-Alignment)
     fig, ax = plt.subplots(figsize=(10, 6))
     for (s_t, t_t), group in df_layer_profiles.groupby(["source_task", "target_task"]):
         if s_t != t_t:
-            ax.plot(group["layer"], group["linear_cka"], label=f"{s_t} ↔ {t_t}", marker="o", markersize=3)
+            ax.plot(
+                group["layer"],
+                group["linear_cka"],
+                label=f"{s_t} ↔ {t_t}",
+                marker="o",
+                markersize=3,
+            )
     ax.set_xlabel("Layer Index")
     ax.set_ylabel("Linear CKA (Direct Diagonal Alignment)")
     ax.set_title("Cross-Task Representation Convergence Across Transformer Depth")
     ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
     ax.grid(alpha=0.25)
     fig.tight_layout()
-    fig.savefig(os.path.join(plots_dir, "cross_task_layer_cka_trajectories.png"), dpi=200, bbox_inches="tight")
+    fig.savefig(
+        os.path.join(plots_dir, "cross_task_layer_cka_trajectories.png"),
+        dpi=200,
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
     print("\n================ FINAL RESULTS SUMMARY ================")
     print("\nEmpirical Mean Causal Transfer (Phase 2):")
-    print(pd.DataFrame(matrices["mean_transfer"], index=task_keys, columns=task_keys).round(4))
+    print(
+        pd.DataFrame(
+            matrices["mean_transfer"], index=task_keys, columns=task_keys
+        ).round(4)
+    )
     print("\nMacro Mean Linear CKA (Phase 4):")
     print(df_macro_lin_cka)
 
