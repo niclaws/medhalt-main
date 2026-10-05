@@ -14,6 +14,7 @@ from tqdm import tqdm
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from medhalt.prompts.utils import get_samples
+from patching_engine import CenteredKernelAlignment
 
 from zoneinfo import ZoneInfo
 
@@ -250,10 +251,10 @@ class MedHALTPairBuilder:
                         )
 
                         clean_ids = self.tokenizer(
-                            self.format_prompt(clean), return_tensors="pt"
+                            self.format_prompt(clean, self.model_type), return_tensors="pt"
                         ).input_ids
                         corrupt_ids = self.tokenizer(
-                            self.format_prompt(corrupt), return_tensors="pt"
+                            self.format_prompt(corrupt, self.model_type), return_tensors="pt"
                         ).input_ids
 
                         if common_prefix_ids:
@@ -398,7 +399,7 @@ class MedHALTPairBuilder:
 
 
 # =====================================================================
-# 2. Optimized Causal Engine with Batched Interventions
+# 2. Optimized Causal Engine with Extraction & Intervention Hooks
 # =====================================================================
 
 class CausalEngine:
@@ -408,7 +409,6 @@ class CausalEngine:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Standard float16 is universally compatible with NumPy conversion and fits easily in 22GB
         dtype = torch.float16
         # max_mem = {0: "40GiB"} if torch.cuda.device_count() == 1 else "auto"
 
@@ -467,6 +467,42 @@ class CausalEngine:
 
         return head_cache, mlp_cache
 
+    def extract_task_representations(
+        self,
+        samples: List[Dict],
+        max_samples: int = 50
+    ) -> Dict[int, torch.Tensor]:
+        """Extracts token decision representations across all layers for CKA."""
+        layer_reps = {l: [] for l in range(self.num_layers)}
+        eval_samples = samples[:max_samples]
+        device = self.model.device
+
+        for sample in eval_samples:
+            clean_ids = sample["clean_ids"].to(device)
+            sample_cache = {}
+            hooks = []
+
+            def make_hook(layer_i):
+                def hook_fn(module, inp, outp):
+                    act = outp[0] if isinstance(outp, tuple) else outp
+                    # Target final decision token representation
+                    sample_cache[layer_i] = act[:, -1, :].detach().cpu()
+                return hook_fn
+
+            for l in range(self.num_layers):
+                hooks.append(self.layers[l].register_forward_hook(make_hook(l)))
+
+            with torch.inference_mode():
+                self.model(clean_ids)
+
+            for h in hooks:
+                h.remove()
+
+            for l in range(self.num_layers):
+                layer_reps[l].append(sample_cache[l])
+
+        return {l: torch.cat(layer_reps[l], dim=0) for l in range(self.num_layers)}
+
     def patch_heads_layer_batched(
         self,
         corrupt_ids: torch.Tensor,
@@ -476,7 +512,6 @@ class CausalEngine:
         clean_act: torch.Tensor,
         chunk_size: int = 32
     ) -> np.ndarray:
-        """Vectorized execution: runs 32 head patches in a single batched pass."""
         target_diffs = np.zeros(self.num_heads, dtype=np.float32)
         total_heads = self.num_heads
         device = self.model.device
@@ -526,7 +561,6 @@ class CausalEngine:
             layer_idx: int,
             clean_act: torch.Tensor
     ) -> float:
-        """Patches an isolated MLP activation into the corrupted pass."""
         def hook_fn(module, inp, outp):
             if clean_act.shape[1] != outp.shape[1]:
                 curr = outp.clone()
@@ -698,7 +732,6 @@ def discover_circuit(
     min_denom: float = 1e-4,
     head_batch_size: int = 32
 ) -> Dict[str, object]:
-    """Runs vectorized AIE sweep (32x faster than serial component patching)."""
     sample_rows = []
     per_sample_head = []
     per_sample_mlp = []
@@ -738,14 +771,12 @@ def discover_circuit(
         head_effect = np.zeros((engine.num_layers, engine.num_heads), dtype=np.float32)
         mlp_effect = np.zeros(engine.num_layers, dtype=np.float32)
 
-        # Batched sweep over heads: 1 pass per layer
         for layer in range(engine.num_layers):
             layer_diffs = engine.patch_heads_layer_batched(
                 corrupt_ids, t_id, h_id, layer, head_cache[layer], chunk_size=head_batch_size
             )
             head_effect[layer, :] = (layer_diffs - d_corrupt) / denom
 
-        # MLPs
         for layer in range(engine.num_layers):
             d_patched = engine.patch_single_component(
                 corrupt_ids, t_id, h_id, "mlp", layer, mlp_cache[layer]
@@ -979,6 +1010,18 @@ def save_heatmap(matrix, labels, title, path, fmt=".3f"):
     plt.close(fig)
 
 
+def save_cka_layer_matrix_plot(cka_matrix: np.ndarray, task_a: str, task_b: str, output_path: str):
+    fig, ax = plt.subplots(figsize=(9, 8))
+    im = ax.imshow(cka_matrix, origin="lower", cmap="magma", vmin=0.0, vmax=1.0)
+    ax.set_xlabel(f"Layers ({task_b})")
+    ax.set_ylabel(f"Layers ({task_a})")
+    ax.set_title(f"Layer-to-Layer Linear CKA Alignment: {task_a} vs {task_b}")
+    fig.colorbar(im, ax=ax, label="Linear CKA Similarity")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def save_head_aie_heatmap(head_aie, task_name, output_path):
     fig, ax = plt.subplots(figsize=(12, 8))
     im = ax.imshow(head_aie, aspect="auto")
@@ -1130,6 +1173,7 @@ def main():
     parser.add_argument("--bootstrap_confidence", type=float, default=0.95)
     parser.add_argument("--num_random_controls", type=int, default=20)
     parser.add_argument("--control_samples", type=int, default=50, help="Sample subset size for random controls")
+    parser.add_argument("--cka_samples", type=int, default=50, help="Sample count per task for CKA analysis")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, default="./causal_results")
     parser.add_argument("--hf_repo_id", type=str, default="damonsalvatore123/medhalt")
@@ -1148,8 +1192,10 @@ def main():
     clean_model_id = args.model_name.replace("/", "_")
     plots_dir = os.path.join(args.output_dir, "plots", clean_model_id)
     arrays_dir = os.path.join(args.output_dir, "aie_arrays", clean_model_id)
+    cka_dir = os.path.join(args.output_dir, "cka_analysis", clean_model_id)
     os.makedirs(plots_dir, exist_ok=True)
     os.makedirs(arrays_dir, exist_ok=True)
+    os.makedirs(cka_dir, exist_ok=True)
 
     thresholds = sorted(set([args.min_denom] + list(args.denom_thresholds)))
     tasks = {
@@ -1159,7 +1205,6 @@ def main():
         "Title2URL": "title2pub",
     }
 
-    # Determine model family cleanly
     model_name_lower = args.model_name.lower()
     if args.is_qwen or "qwen" in model_name_lower:
         model_type = "qwen"
@@ -1402,7 +1447,7 @@ def main():
         )
 
     # ------------------------------------------------------------------
-    # Phase 3: Random Circuit Controls (Targeted Subset Optimization)
+    # Phase 3: Random Circuit Controls
     # ------------------------------------------------------------------
     control_replicate_rows = []
     control_summary_rows = []
@@ -1416,7 +1461,6 @@ def main():
 
             for target_idx, target_task in enumerate(task_keys):
                 observed = primary_stats[(source_task, target_task)]["mean"]
-                # Use representative subset of target samples for control sweeps
                 eval_subset = datasets[target_task][:min(len(datasets[target_task]), args.control_samples)]
 
                 for control_type in ["uniform", "layer_matched"]:
@@ -1487,9 +1531,117 @@ def main():
         os.path.join(args.output_dir, f"{clean_model_id}_random_control_summary.csv"), index=False
     )
 
-    print("\n================ RESULTS ================")
-    print("\nEmpirical Mean Transfer:")
+    # ------------------------------------------------------------------
+    # Phase 4: In-Depth CKA (Centered Kernel Alignment) Analysis
+    # ------------------------------------------------------------------
+    print("\n--- Phase 4: In-Depth CKA Representation Analysis ---", now())
+    task_reps = {}
+    n_cka = args.cka_samples
+
+    for task_key in task_keys:
+        print(f"[CKA] Extracting layer activations for {task_key} ({n_cka} samples)...", now())
+        task_reps[task_key] = engine.extract_task_representations(
+            datasets[task_key], max_samples=n_cka
+        )
+
+    # 1. Macro Task-to-Task CKA Matrix (Layer-averaged and Final-layer)
+    num_t = len(task_keys)
+    macro_linear_cka = np.zeros((num_t, num_t))
+    macro_rbf_cka = np.zeros((num_t, num_t))
+    final_layer_linear_cka = np.zeros((num_t, num_t))
+    final_l = engine.num_layers - 1
+
+    for i, s_task in enumerate(task_keys):
+        for j, t_task in enumerate(task_keys):
+            # Compute average CKA across all layers
+            layer_lin_sims = []
+            layer_rbf_sims = []
+            for l in range(engine.num_layers):
+                x_rep = task_reps[s_task][l]
+                y_rep = task_reps[t_task][l]
+                layer_lin_sims.append(CenteredKernelAlignment.linear_cka(x_rep, y_rep))
+                layer_rbf_sims.append(CenteredKernelAlignment.rbf_cka(x_rep, y_rep))
+
+            macro_linear_cka[i, j] = float(np.mean(layer_lin_sims))
+            macro_rbf_cka[i, j] = float(np.mean(layer_rbf_sims))
+            final_layer_linear_cka[i, j] = CenteredKernelAlignment.linear_cka(
+                task_reps[s_task][final_l], task_reps[t_task][final_l]
+            )
+
+    df_macro_lin_cka = pd.DataFrame(macro_linear_cka, index=task_keys, columns=task_keys).round(4)
+    df_macro_rbf_cka = pd.DataFrame(macro_rbf_cka, index=task_keys, columns=task_keys).round(4)
+    df_final_lin_cka = pd.DataFrame(final_layer_linear_cka, index=task_keys, columns=task_keys).round(4)
+
+    df_macro_lin_cka.to_csv(os.path.join(cka_dir, f"{clean_model_id}_mean_linear_cka.csv"))
+    df_macro_rbf_cka.to_csv(os.path.join(cka_dir, f"{clean_model_id}_mean_rbf_cka.csv"))
+    df_final_lin_cka.to_csv(os.path.join(cka_dir, f"{clean_model_id}_final_layer_linear_cka.csv"))
+
+    save_heatmap(
+        macro_linear_cka, task_keys, "Macro Mean Linear CKA",
+        os.path.join(plots_dir, "macro_mean_linear_cka_heatmap.png")
+    )
+    save_heatmap(
+        final_layer_linear_cka, task_keys, f"Final Layer (L{final_l}) Linear CKA",
+        os.path.join(plots_dir, "final_layer_linear_cka_heatmap.png")
+    )
+
+    # 2. Granular Layer-by-Layer CKA Matrices (Cross-Task Layer Dynamics)
+    cka_layer_profile_rows = []
+    print("[CKA] Computing fine-grained layer-by-layer CKA dynamics...", now())
+
+    for i, s_task in enumerate(task_keys):
+        for j, t_task in enumerate(task_keys):
+            if i > j:
+                continue  # Symmetric cross-task inspection
+
+            full_layer_matrix = np.zeros((engine.num_layers, engine.num_layers), dtype=np.float32)
+            for l_s in range(engine.num_layers):
+                for l_t in range(engine.num_layers):
+                    rep_s = task_reps[s_task][l_s]
+                    rep_t = task_reps[t_task][l_t]
+                    sim = CenteredKernelAlignment.linear_cka(rep_s, rep_t)
+                    full_layer_matrix[l_s, l_t] = sim
+                    if l_s == l_t:
+                        cka_layer_profile_rows.append({
+                            "source_task": s_task,
+                            "target_task": t_task,
+                            "layer": l_s,
+                            "linear_cka": sim
+                        })
+
+            np.save(
+                os.path.join(cka_dir, f"{s_task}_vs_{t_task}_layer_cka.npy"),
+                full_layer_matrix
+            )
+            save_cka_layer_matrix_plot(
+                full_layer_matrix,
+                s_task,
+                t_task,
+                os.path.join(plots_dir, f"layer_cka_{s_task}_vs_{t_task}.png")
+            )
+
+    df_layer_profiles = pd.DataFrame(cka_layer_profile_rows)
+    df_layer_profiles.to_csv(os.path.join(cka_dir, f"{clean_model_id}_diagonal_layer_cka.csv"), index=False)
+
+    # 3. Layer CKA Trajectory Plot (Reasoning vs Retrieval Cross-Alignment)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for (s_t, t_t), group in df_layer_profiles.groupby(["source_task", "target_task"]):
+        if s_t != t_t:
+            ax.plot(group["layer"], group["linear_cka"], label=f"{s_t} ↔ {t_t}", marker="o", markersize=3)
+    ax.set_xlabel("Layer Index")
+    ax.set_ylabel("Linear CKA (Direct Diagonal Alignment)")
+    ax.set_title("Cross-Task Representation Convergence Across Transformer Depth")
+    ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, "cross_task_layer_cka_trajectories.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    print("\n================ FINAL RESULTS SUMMARY ================")
+    print("\nEmpirical Mean Causal Transfer (Phase 2):")
     print(pd.DataFrame(matrices["mean_transfer"], index=task_keys, columns=task_keys).round(4))
+    print("\nMacro Mean Linear CKA (Phase 4):")
+    print(df_macro_lin_cka)
 
     if not args.skip_hf_upload:
         path_in_repo = args.hf_path_in_repo.strip("/") or (

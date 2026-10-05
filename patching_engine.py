@@ -16,10 +16,93 @@ def now():
     return datetime.now(IST)
 
 
+# =====================================================================
+# Centered Kernel Alignment (CKA) Engine
+# =====================================================================
+
+class CenteredKernelAlignment:
+    """
+    Computes Linear and RBF Centered Kernel Alignment (CKA) with
+    unbiased Hilbert-Schmidt Independence Criterion (HSIC).
+    """
+
+    @staticmethod
+    def centering_matrix(n: int, device: torch.device) -> torch.Tensor:
+        unit = torch.ones((n, n), device=device)
+        identity = torch.eye(n, device=device)
+        return identity - unit / n
+
+    @classmethod
+    def linear_hsic(cls, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Computes unbiased HSIC for linear kernel: X, Y shaped [N, D]."""
+        n = x.size(0)
+        h = cls.centering_matrix(n, x.device)
+        k = torch.matmul(x, x.t())
+        l = torch.matmul(y, y.t())
+        k_c = torch.matmul(torch.matmul(h, k), h)
+        l_c = torch.matmul(torch.matmul(h, l), h)
+        return torch.sum(k_c * l_c) / ((n - 1) ** 2)
+
+    @classmethod
+    def rbf_hsic(cls, x: torch.Tensor, y: torch.Tensor, sigma: Optional[float] = None) -> torch.Tensor:
+        """Computes HSIC with Radial Basis Function (RBF) kernel."""
+        n = x.size(0)
+        dist_x = torch.cdist(x, x, p=2) ** 2
+        dist_y = torch.cdist(y, y, p=2) ** 2
+
+        if sigma is None:
+            # Median heuristic for RBF bandwidth
+            sigma_x = torch.median(dist_x[dist_x > 0]).sqrt() if (dist_x > 0).any() else 1.0
+            sigma_y = torch.median(dist_y[dist_y > 0]).sqrt() if (dist_y > 0).any() else 1.0
+        else:
+            sigma_x = sigma_y = sigma
+
+        k = torch.exp(-dist_x / (2 * (sigma_x ** 2) + 1e-8))
+        l = torch.exp(-dist_y / (2 * (sigma_y ** 2) + 1e-8))
+
+        h = cls.centering_matrix(n, x.device)
+        k_c = torch.matmul(torch.matmul(h, k), h)
+        l_c = torch.matmul(torch.matmul(h, l), h)
+        return torch.sum(k_c * l_c) / ((n - 1) ** 2)
+
+    @classmethod
+    def linear_cka(cls, x: torch.Tensor, y: torch.Tensor) -> float:
+        """
+        Calculates Linear CKA:
+        CKA(X, Y) = HSIC(K, L) / sqrt(HSIC(K, K) * HSIC(L, L))
+        """
+        x_flat = x.reshape(x.size(0), -1).float()
+        y_flat = y.reshape(y.size(0), -1).float()
+
+        hsic_xy = cls.linear_hsic(x_flat, y_flat)
+        hsic_xx = cls.linear_hsic(x_flat, x_flat)
+        hsic_yy = cls.linear_hsic(y_flat, y_flat)
+
+        denom = torch.sqrt(hsic_xx * hsic_yy)
+        if denom.item() <= 1e-12:
+            return 0.0
+        return float((hsic_xy / denom).clamp(0.0, 1.0).item())
+
+    @classmethod
+    def rbf_cka(cls, x: torch.Tensor, y: torch.Tensor, sigma: Optional[float] = None) -> float:
+        """Calculates RBF Kernel CKA."""
+        x_flat = x.reshape(x.size(0), -1).float()
+        y_flat = y.reshape(y.size(0), -1).float()
+
+        hsic_xy = cls.rbf_hsic(x_flat, y_flat, sigma=sigma)
+        hsic_xx = cls.rbf_hsic(x_flat, x_flat, sigma=sigma)
+        hsic_yy = cls.rbf_hsic(y_flat, y_flat, sigma=sigma)
+
+        denom = torch.sqrt(hsic_xx * hsic_yy)
+        if denom.item() <= 1e-12:
+            return 0.0
+        return float((hsic_xy / denom).clamp(0.0, 1.0).item())
+
+
 class CausalMediationHarness:
     """
     Manages model loading, registers PyTorch forward hooks,
-    and performs batched and isolated activation patching.
+    extracts representations for CKA, and performs activation patching.
     """
 
     def __init__(self, model_name_or_path: str, is_qwen: bool = False):
@@ -36,13 +119,12 @@ class CausalMediationHarness:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             print(f"[Harness Init] pad_token set to eos_token (ID: {self.tokenizer.pad_token_id})", now())
 
-        # Standard float16 is universally compatible with NumPy conversion and fits easily in 22GB
         dtype = torch.float16
         print(f"[Harness Init] Loading model with dtype={dtype}...", now())
         # max_mem = {0: "21GiB"} if torch.cuda.device_count() == 1 else "auto"
 
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
+            model_name_or_path,
             torch_dtype=dtype,
             device_map="auto",
             # max_memory="auto",
@@ -58,7 +140,6 @@ class CausalMediationHarness:
             or self.model.config.hidden_size // self.num_heads
         )
 
-        # Locate transformer layers
         if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
             self.layers = self.model.model.layers
         else:
@@ -99,10 +180,7 @@ class CausalMediationHarness:
         return diff
 
     def cache_activations(self, input_ids: torch.Tensor) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
-        """
-        Extracts head outputs and MLP outputs from clean forward pass.
-        Tensors are maintained on model device for zero CPU-transfer overhead during sweep.
-        """
+        """Extracts head outputs and MLP outputs from clean forward pass."""
         head_cache = {}
         mlp_cache = {}
         hooks = []
@@ -132,6 +210,54 @@ class CausalMediationHarness:
 
         return head_cache, mlp_cache
 
+    def extract_representations(
+        self,
+        samples: List[Dict],
+        target_token_only: bool = True,
+        max_samples: int = 50
+    ) -> Dict[int, torch.Tensor]:
+        """
+        Extracts layer hidden representations across samples for in-depth CKA analysis.
+        Returns: {layer_idx: Tensor of shape [N, hidden_dim]}
+        """
+        layer_reps = {l: [] for l in range(self.num_layers)}
+        eval_samples = samples[:max_samples]
+        device = self.model.device
+
+        for sample in eval_samples:
+            clean_ids = sample["clean_ids"].to(device)
+            sample_cache = {}
+            hooks = []
+
+            def make_hook(layer_i):
+                def hook_fn(module, inp, outp):
+                    act = outp[0] if isinstance(outp, tuple) else outp
+                    if target_token_only:
+                        # Extract final decision token representation
+                        sample_cache[layer_i] = act[:, -1, :].detach().cpu()
+                    else:
+                        # Mean pool across sequence length
+                        sample_cache[layer_i] = act.mean(dim=1).detach().cpu()
+                return hook_fn
+
+            for l in range(self.num_layers):
+                hooks.append(self.layers[l].register_forward_hook(make_hook(l)))
+
+            with torch.inference_mode():
+                self.model(clean_ids)
+
+            for h in hooks:
+                h.remove()
+
+            for l in range(self.num_layers):
+                layer_reps[l].append(sample_cache[l])
+
+        # Stack into [N, hidden_dim] per layer
+        stacked_reps = {
+            l: torch.cat(layer_reps[l], dim=0) for l in range(self.num_layers)
+        }
+        return stacked_reps
+
     def patch_heads_layer_batched(
         self,
         corrupt_ids: torch.Tensor,
@@ -141,10 +267,7 @@ class CausalMediationHarness:
         clean_activation: torch.Tensor,
         chunk_size: int = 32
     ) -> np.ndarray:
-        """
-        Patches all attention heads in a layer simultaneously using batched corrupt passes.
-        Reduces num_heads forward passes down to ceil(num_heads / chunk_size) passes.
-        """
+        """Patches all attention heads in a layer simultaneously using batched corrupt passes."""
         target_diffs = np.zeros(self.num_heads, dtype=np.float32)
         total_heads = self.num_heads
         input_device = self.model.device
@@ -154,7 +277,6 @@ class CausalMediationHarness:
             active_heads = list(range(start_idx, end_idx))
             batch_k = len(active_heads)
 
-            # Repeat corrupt_ids along batch dim: [batch_k, S]
             batched_corrupt = corrupt_ids.repeat(batch_k, 1).to(input_device)
 
             def batched_patch_hook(module, inp, outp):
@@ -178,7 +300,7 @@ class CausalMediationHarness:
             handle = self.layers[layer_idx].self_attn.register_forward_hook(batched_patch_hook)
             with torch.inference_mode():
                 outputs = self.model(batched_corrupt)
-                logits = outputs.logits[:, -1, :] # [batch_k, Vocab]
+                logits = outputs.logits[:, -1, :]
                 diffs = (logits[:, target_id] - logits[:, halluc_id]).float().cpu().numpy()
 
             handle.remove()
@@ -196,9 +318,7 @@ class CausalMediationHarness:
         clean_activation: torch.Tensor,
         head_idx: Optional[int] = None
     ) -> float:
-        """
-        Executes counterfactual forward pass patching clean activation into corrupt run.
-        """
+        """Executes counterfactual forward pass patching clean activation into corrupt run."""
         def patch_hook(module, inp, outp):
             if component_type == "mlp":
                 clean_act = clean_activation.to(outp.device)
@@ -244,10 +364,7 @@ class CausalMediationHarness:
 
 
 class ContrastiveMedHALTDataset:
-    """
-    Constructs matched (Clean, Corrupted, Target_Token, Hallucinated_Token) pairs
-    for the 4 primary Med-HALT evaluation tasks.
-    """
+    """Constructs matched (Clean, Corrupted, Target_Token, Hallucinated_Token) pairs."""
 
     def __init__(self, tokenizer, is_qwen: bool = False):
         self.tokenizer = tokenizer
