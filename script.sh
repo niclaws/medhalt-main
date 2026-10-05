@@ -95,9 +95,9 @@ python "$SCRIPT" \
     --num_random_controls 20 \
     --control_samples 50 \
     --seed 42 \
-    --output_dir /results/mistral_7b_seed42 \
+    --output_dir /results/mistral_7b_seed42_new \
     --hf_repo_id "$HF_REPO" \
-    2>&1 | tee /results/logs/mistral_7b_seed42.log
+    2>&1 | tee /results/mistral_7b_seed42_new/logs/mistral_7b_seed42_new.log
 
 STATUS_MISTRAL=${PIPESTATUS[0]}
 if [ "$STATUS_MISTRAL" -eq 0 ]; then
@@ -127,9 +127,9 @@ python "$SCRIPT" \
     --num_random_controls 20 \
     --control_samples 50 \
     --seed 42 \
-    --output_dir /results/qwen3_8b_seed42 \
+    --output_dir /results/qwen3_8b_seed42_new \
     --hf_repo_id "$HF_REPO" \
-    2>&1 | tee /results/logs/qwen3_8b_seed42.log
+    2>&1 | tee /results/qwen3_8b_seed42_new/logs/qwen3_8b_seed42_new.log
 
 STATUS_QWEN=${PIPESTATUS[0]}
 if [ "$STATUS_QWEN" -eq 0 ]; then
