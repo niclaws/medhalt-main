@@ -30,21 +30,31 @@ def now():
 class MedHALTPairBuilder:
     VALID_OPTION_LABELS = {"A", "B", "C", "D", "E"}
 
-    def __init__(self, tokenizer, is_qwen: bool = False, seed: int = 42):
+    def __init__(self, tokenizer, model_type: str = "default", seed: int = 42):
         self.tokenizer = tokenizer
-        self.is_qwen = is_qwen
+        self.model_type = model_type
         self.seed = seed
 
-    def format_prompt(self, user_content: str) -> str:
-        if not self.is_qwen:
-            return user_content
-        return (
-            "<|im_start|>system\n"
-            "You are a factual medical assistant. Give the concise direct answer "
-            "without any thinking process or inner monologue.<|im_end|>\n"
-            f"<|im_start|>user\n{user_content}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
+    def format_prompt(self, user_content: str, model_type: str = "default") -> str:
+        if model_type == "qwen":
+            return (
+                "<|im_start|>system\n"
+                "You are a factual medical assistant. Give the concise direct answer "
+                "without any thinking process or inner monologue.<|im_end|>\n"
+                f"<|im_start|>user\n{user_content}<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            )
+        elif model_type == "med42":
+            # Llama-3 / Med42-v2 chat template
+            return (
+                "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+                "You are a helpful, respectful, and honest clinical assistant. "
+                "Provide the direct and concise answer.<|eot_id|>"
+                f"<|start_header_id|>user<|end_header_id|>\n\n{user_content}<|eot_id|>"
+                "<|start_header_id|>assistant<|end_header_id|>\n\n"
+            )
+        # Default for Mistral-7B and BioMistral-7B (standard instruction format)
+        return user_content
 
     @classmethod
     def normalize_option_label(cls, value) -> Optional[str]:
@@ -140,8 +150,8 @@ class MedHALTPairBuilder:
         if t_id is None or h_id is None or t_id == h_id:
             return None
 
-        clean_prompt = self.format_prompt(clean_txt)
-        corrupt_prompt = self.format_prompt(corrupt_txt)
+        clean_prompt = self.format_prompt(clean_txt, self.model_type)
+        corrupt_prompt = self.format_prompt(corrupt_txt, self.model_type)
         pair = {
             "clean_ids": self.tokenizer(clean_prompt, return_tensors="pt").input_ids,
             "corrupt_ids": self.tokenizer(corrupt_prompt, return_tensors="pt").input_ids,
@@ -1149,8 +1159,19 @@ def main():
         "Title2URL": "title2pub",
     }
 
-    engine = CausalEngine(args.model_name, is_qwen=args.is_qwen)
-    pair_builder = MedHALTPairBuilder(engine.tokenizer, is_qwen=args.is_qwen, seed=args.seed)
+    # Determine model family cleanly
+    model_name_lower = args.model_name.lower()
+    if args.is_qwen or "qwen" in model_name_lower:
+        model_type = "qwen"
+    elif "med42" in model_name_lower:
+        model_type = "med42"
+    else:
+        model_type = "default"  # Works identically for Mistral and BioMistral
+
+    print(f"[INIT] Model family resolved to: '{model_type}'")
+
+    engine = CausalEngine(args.model_name, is_qwen=(model_type == "qwen"))
+    pair_builder = MedHALTPairBuilder(engine.tokenizer, model_type=model_type, seed=args.seed)
     total_components = engine.num_layers * engine.num_heads + engine.num_layers
     k_values = sorted({k for k in list(args.k_values) + [args.top_k] if 0 < k <= total_components})
 

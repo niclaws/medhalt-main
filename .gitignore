@@ -8,3 +8,4 @@ dist/
 build/
 medhalt/predictions/
 .idea/
+results/
