@@ -56,7 +56,13 @@ class MedHALTPairBuilder:
                 f"<|start_header_id|>user<|end_header_id|>\n\n{user_content}<|eot_id|>"
                 "<|start_header_id|>assistant<|end_header_id|>\n\n"
             )
-        # Default for Mistral-7B and BioMistral-7B (standard instruction format)
+        elif model_type == "gemma":
+            # Strictly end on model turn without trailing newline
+            return f"<start_of_turn>user\n{user_content}<end_of_turn>\n<start_of_turn>model\n"
+        elif model_type in {"phi", "mediphi"}:
+            # Native Phi-3 / MediPhi instruction format
+            return f"<|user|>\n{user_content}<|end|>\n" "<|assistant|>\n"
+        # Default for Mistral-7B (standard instruction format)
         return user_content
 
     @classmethod
@@ -117,9 +123,19 @@ class MedHALTPairBuilder:
         cleaned = str(token_str).strip()
         if not cleaned:
             return None
-        tokens = self.tokenizer.encode(" " + cleaned, add_special_tokens=False)
-        if not tokens:
-            tokens = self.tokenizer.encode(cleaned, add_special_tokens=False)
+
+        # For Gemma/Llama models, test single-token continuation directly
+        for candidate in [cleaned, " " + cleaned]:
+            tokens = self.tokenizer.encode(candidate, add_special_tokens=False)
+            # Remove leading BOS if present
+            if tokens and tokens[0] == self.tokenizer.bos_token_id:
+                tokens = tokens[1:]
+            if len(tokens) == 1:
+                return tokens[0]
+
+        tokens = self.tokenizer.encode(cleaned, add_special_tokens=False)
+        if tokens and tokens[0] == self.tokenizer.bos_token_id:
+            tokens = tokens[1:]
         return tokens[0] if tokens else None
 
     def get_first_distinct_url_token_pair(self, clean_pmid: str, corrupt_pmid: str):
@@ -440,30 +456,122 @@ class CausalEngine:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        dtype = torch.float16
-        # max_mem = {0: "40GiB"} if torch.cuda.device_count() == 1 else "auto"
+        # Allocate explicit VRAM headroom per 11GB GPU (reserving ~1.5 GB for activations & hooks)
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            max_memory = {i: "9.5GiB" for i in range(num_gpus)}
+        else:
+            max_memory = {0: "40GiB"}
 
+        dtype = torch.float16
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=dtype,
             device_map="auto",
-            # max_memory=max_mem,
+            max_memory=max_memory,
             trust_remote_code=True,
         )
         self.model.eval()
 
-        self.layers = self.model.model.layers
-        self.num_layers = self.model.config.num_hidden_layers
-        self.num_heads = self.model.config.num_attention_heads
+        # 1. Direct path lookup prioritizing the Language Model text backbone
+        layers_module = None
+        for attr_path in [
+            (
+                "model",
+                "language_model",
+                "model",
+                "layers",
+            ),  # Gemma-3 multimodal wrapper
+            ("language_model", "model", "layers"),  # Gemma-3 text backbone
+            ("model", "text_model", "layers"),  # Gemma-3 variant
+            ("model", "layers"),  # Standard LLaMA / Mistral / Qwen / Baichuan
+            ("layers",),
+        ]:
+            curr = self.model
+            for step in attr_path:
+                curr = getattr(curr, step, None)
+                if curr is None:
+                    break
+            if (
+                curr is not None
+                and isinstance(curr, (torch.nn.ModuleList, list))
+                and len(curr) > 0
+            ):
+                layers_module = curr
+                print(
+                    f"[Engine] Found language decoder layers via direct path: {'.'.join(attr_path)} (Length: {len(curr)})",
+                    now(),
+                )
+                break
 
-        self.head_dim = (
-            getattr(self.model.config, "head_dim", None)
-            or self.model.config.hidden_size // self.num_heads
-        )
+        # 2. Resilient traversal: exclude vision tower and pick the largest decoder ModuleList
+        if layers_module is None:
+            candidate_lists = []
+            for name, module in self.model.named_modules():
+                # Explicitly ignore vision encoder modules
+                if (
+                    "vision" in name.lower()
+                    or "image" in name.lower()
+                    or "projector" in name.lower()
+                ):
+                    continue
+                if (
+                    name.endswith("layers")
+                    and isinstance(module, torch.nn.ModuleList)
+                    and len(module) > 0
+                ):
+                    sample_block = module[0]
+                    if hasattr(sample_block, "self_attn") or hasattr(
+                        sample_block, "mlp"
+                    ):
+                        candidate_lists.append((len(module), name, module))
+
+            if candidate_lists:
+                candidate_lists.sort(key=lambda x: x[0], reverse=True)
+                layers_module = candidate_lists[0][2]
+                print(
+                    f"[Engine] Selected language layers: '{candidate_lists[0][1]}' (Length: {len(layers_module)})",
+                    now(),
+                )
+
+        if layers_module is None:
+            raise AttributeError(
+                f"Could not locate text decoder layers for '{model_name}'."
+            )
+
+        self.layers = layers_module
+
+        # Resolve config parameters accurately for standard and multimodal models
+        cfg = getattr(self.model.config, "text_config", self.model.config)
+        self.num_layers = len(self.layers)
+
+        # 1. Resolve head_dim
+        self.head_dim = getattr(cfg, "head_dim", None)
+        hidden_sz = getattr(cfg, "hidden_size", None)
+
+        # 2. Resolve attention head count strictly matching self_attn projection dimension
+        # Check explicit query head counts first
+        num_heads = getattr(cfg, "num_attention_heads", None)
+
+        # In Gemma-3 / GQA models, ensure num_heads * head_dim == hidden_size
+        if hidden_sz is not None and self.head_dim is not None:
+            derived_heads = hidden_sz // self.head_dim
+            if num_heads is None or (num_heads * self.head_dim != hidden_sz):
+                print(
+                    f"[Engine Fix] Correcting num_heads from {num_heads} to {derived_heads} "
+                    f"(hidden_size={hidden_sz}, head_dim={self.head_dim})",
+                    now(),
+                )
+                num_heads = derived_heads
+
+        if self.head_dim is None and hidden_sz is not None and num_heads is not None:
+            self.head_dim = hidden_sz // num_heads
+
+        self.num_heads = num_heads
 
         print(
-            f"[Engine] Model Loaded. Layers: {self.num_layers}, Heads: {self.num_heads}, "
-            f"head_dim={self.head_dim}, hidden_size={self.model.config.hidden_size}",
+            f"[Engine] Model Loaded. Verified Layers: {self.num_layers}, "
+            f"Query Heads: {self.num_heads}, Head Dim: {self.head_dim}, Hidden Dim: {hidden_sz}",
             now(),
         )
 
@@ -484,17 +592,17 @@ class CausalEngine:
 
         def get_attn_hook(l):
             def hook(module, inp, outp):
+                act = outp[0] if isinstance(outp, tuple) else outp
                 head_cache[l] = (
-                    outp[0].detach() if isinstance(outp, tuple) else outp.detach()
-                )
+                    act.detach().cpu()
+                )  # Offload to CPU cache to protect 11GB VRAM
 
             return hook
 
         def get_mlp_hook(l):
             def hook(module, inp, outp):
-                mlp_cache[l] = (
-                    outp[0].detach() if isinstance(outp, tuple) else outp.detach()
-                )
+                act = outp[0] if isinstance(outp, tuple) else outp
+                mlp_cache[l] = act.detach().cpu()  # Offload to CPU cache
 
             return hook
 
@@ -527,9 +635,19 @@ class CausalEngine:
 
             def make_hook(layer_i):
                 def hook_fn(module, inp, outp):
-                    act = outp[0] if isinstance(outp, tuple) else outp
-                    # Target final decision token representation
-                    sample_cache[layer_i] = act[:, -1, :].detach().cpu()
+                    # Handle Gemma-3 tuple unpack safely
+                    if isinstance(outp, tuple):
+                        act = outp[0]
+                    else:
+                        act = outp
+
+                    # Ensure act is a 3D tensor [B, S, D]
+                    if hasattr(act, "last_hidden_state"):
+                        act = act.last_hidden_state
+
+                    sample_cache[layer_i] = (
+                        act[:, -1, :].detach().to(torch.float32).cpu()
+                    )
 
                 return hook_fn
 
@@ -558,14 +676,15 @@ class CausalEngine:
     ) -> np.ndarray:
         target_diffs = np.zeros(self.num_heads, dtype=np.float32)
         total_heads = self.num_heads
-        device = self.model.device
+        first_device = self.model.device
+        layer_device = next(self.layers[layer_idx].parameters()).device
 
         for start_idx in range(0, total_heads, chunk_size):
             end_idx = min(start_idx + chunk_size, total_heads)
             active_heads = list(range(start_idx, end_idx))
             batch_k = len(active_heads)
 
-            batched_corrupt = corrupt_ids.repeat(batch_k, 1).to(device)
+            batched_corrupt = corrupt_ids.repeat(batch_k, 1).to(first_device)
 
             def batched_patch_hook(module, inp, outp):
                 curr = outp[0].clone() if isinstance(outp, tuple) else outp.clone()
@@ -1337,8 +1456,12 @@ def main():
         model_type = "qwen"
     elif "med42" in model_name_lower:
         model_type = "med42"
+    elif "gemma" in model_name_lower:
+        model_type = "gemma"
+    elif "phi" in model_name_lower:
+        model_type = "phi"
     else:
-        model_type = "default"  # Works identically for Mistral and BioMistral
+        model_type = "default"  # Works identically for Mistral
 
     print(f"[INIT] Model family resolved to: '{model_type}'")
 

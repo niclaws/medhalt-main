@@ -87,9 +87,10 @@ class CenteredKernelAlignment:
         hsic_yy = cls.linear_hsic(y_flat, y_flat)
 
         denom = torch.sqrt(hsic_xx * hsic_yy)
-        if denom.item() <= 1e-12:
+        if torch.isnan(denom) or denom.item() <= 1e-12:
             return 0.0
-        return float((hsic_xy / denom).clamp(0.0, 1.0).item())
+        val = (hsic_xy / denom).clamp(0.0, 1.0).item()
+        return 0.0 if np.isnan(val) else float(val)
 
     @classmethod
     def rbf_cka(
@@ -130,36 +131,124 @@ class CausalMediationHarness:
                 now(),
             )
 
+        # Allocate explicit VRAM headroom per 11GB GPU (reserving ~1.5 GB for activations & hooks)
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            max_memory = {i: "9.5GiB" for i in range(num_gpus)}
+        else:
+            max_memory = {0: "40GiB"}
+
         dtype = torch.float16
         print(f"[Harness Init] Loading model with dtype={dtype}...", now())
-        # max_mem = {0: "21GiB"} if torch.cuda.device_count() == 1 else "auto"
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             torch_dtype=dtype,
             device_map="auto",
-            # max_memory="auto",
+            max_memory=max_memory,
             trust_remote_code=True,
         )
         self.model.eval()
 
-        self.num_layers = self.model.config.num_hidden_layers
-        self.num_heads = self.model.config.num_attention_heads
+        # 1. Direct path lookup prioritizing the Language Model text backbone
+        layers_module = None
+        for attr_path in [
+            (
+                "model",
+                "language_model",
+                "model",
+                "layers",
+            ),  # Gemma-3 multimodal wrapper
+            ("language_model", "model", "layers"),  # Gemma-3 text backbone
+            ("model", "text_model", "layers"),  # Gemma-3 variant
+            ("model", "layers"),  # Standard LLaMA / Mistral / Qwen / Baichuan
+            ("layers",),
+        ]:
+            curr = self.model
+            for step in attr_path:
+                curr = getattr(curr, step, None)
+                if curr is None:
+                    break
+            if (
+                curr is not None
+                and isinstance(curr, (torch.nn.ModuleList, list))
+                and len(curr) > 0
+            ):
+                layers_module = curr
+                print(
+                    f"[Engine] Found language decoder layers via direct path: {'.'.join(attr_path)} (Length: {len(curr)})",
+                    now(),
+                )
+                break
 
-        self.head_dim = (
-            getattr(self.model.config, "head_dim", None)
-            or self.model.config.hidden_size // self.num_heads
-        )
+        # 2. Resilient traversal: exclude vision tower and pick the largest decoder ModuleList
+        if layers_module is None:
+            candidate_lists = []
+            for name, module in self.model.named_modules():
+                # Explicitly ignore vision encoder modules
+                if (
+                    "vision" in name.lower()
+                    or "image" in name.lower()
+                    or "projector" in name.lower()
+                ):
+                    continue
+                if (
+                    name.endswith("layers")
+                    and isinstance(module, torch.nn.ModuleList)
+                    and len(module) > 0
+                ):
+                    sample_block = module[0]
+                    if hasattr(sample_block, "self_attn") or hasattr(
+                        sample_block, "mlp"
+                    ):
+                        candidate_lists.append((len(module), name, module))
 
-        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
-            self.layers = self.model.model.layers
-        else:
-            raise AttributeError("Unrecognized transformer layer layout.")
+            if candidate_lists:
+                candidate_lists.sort(key=lambda x: x[0], reverse=True)
+                layers_module = candidate_lists[0][2]
+                print(
+                    f"[Engine] Selected language layers: '{candidate_lists[0][1]}' (Length: {len(layers_module)})",
+                    now(),
+                )
 
-        print(f"[Harness Init] Model loaded successfully.", now())
+        if layers_module is None:
+            raise AttributeError(
+                f"Could not locate text decoder layers for '{model_name}'."
+            )
+
+        self.layers = layers_module
+
+        # Resolve config parameters accurately for standard and multimodal models
+        cfg = getattr(self.model.config, "text_config", self.model.config)
+        self.num_layers = len(self.layers)
+
+        # 1. Resolve head_dim
+        self.head_dim = getattr(cfg, "head_dim", None)
+        hidden_sz = getattr(cfg, "hidden_size", None)
+
+        # 2. Resolve attention head count strictly matching self_attn projection dimension
+        # Check explicit query head counts first
+        num_heads = getattr(cfg, "num_attention_heads", None)
+
+        # In Gemma-3 / GQA models, ensure num_heads * head_dim == hidden_size
+        if hidden_sz is not None and self.head_dim is not None:
+            derived_heads = hidden_sz // self.head_dim
+            if num_heads is None or (num_heads * self.head_dim != hidden_sz):
+                print(
+                    f"[Engine Fix] Correcting num_heads from {num_heads} to {derived_heads} "
+                    f"(hidden_size={hidden_sz}, head_dim={self.head_dim})",
+                    now(),
+                )
+                num_heads = derived_heads
+
+        if self.head_dim is None and hidden_sz is not None and num_heads is not None:
+            self.head_dim = hidden_sz // num_heads
+
+        self.num_heads = num_heads
+
         print(
-            f"[Harness Init] Layers: {self.num_layers}, Attention Heads: {self.num_heads}, "
-            f"Head Dim: {self.head_dim}, Hidden Dim: {self.model.config.hidden_size}",
+            f"[Engine] Model Loaded. Verified Layers: {self.num_layers}, "
+            f"Query Heads: {self.num_heads}, Head Dim: {self.head_dim}, Hidden Dim: {hidden_sz}",
             now(),
         )
 
@@ -209,14 +298,16 @@ class CausalMediationHarness:
         def get_attn_hook(l):
             def hook(module, inp, outp):
                 act = outp[0] if isinstance(outp, tuple) else outp
-                head_cache[l] = act.detach()
+                head_cache[l] = (
+                    act.detach().cpu()
+                )  # Offload to CPU cache to protect 11GB VRAM
 
             return hook
 
         def get_mlp_hook(l):
             def hook(module, inp, outp):
                 act = outp[0] if isinstance(outp, tuple) else outp
-                mlp_cache[l] = act.detach()
+                mlp_cache[l] = act.detach().cpu()  # Offload to CPU cache
 
             return hook
 
@@ -293,14 +384,15 @@ class CausalMediationHarness:
         """Patches all attention heads in a layer simultaneously using batched corrupt passes."""
         target_diffs = np.zeros(self.num_heads, dtype=np.float32)
         total_heads = self.num_heads
-        input_device = self.model.device
+        first_device = self.model.device
+        layer_device = next(self.layers[layer_idx].parameters()).device
 
         for start_idx in range(0, total_heads, chunk_size):
             end_idx = min(start_idx + chunk_size, total_heads)
             active_heads = list(range(start_idx, end_idx))
             batch_k = len(active_heads)
 
-            batched_corrupt = corrupt_ids.repeat(batch_k, 1).to(input_device)
+            batched_corrupt = corrupt_ids.repeat(batch_k, 1).to(first_device)
 
             def batched_patch_hook(module, inp, outp):
                 curr = outp[0].clone() if isinstance(outp, tuple) else outp.clone()
