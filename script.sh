@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-PROJECT_DIR="~/projects/medhalt-main/medhalt-main"
+PROJECT_DIR="~/projects/medhalt-main"
 SCRIPT="$PROJECT_DIR/run_casual_transfer.py"
 
 HF_REPO="damonsalvatore123/medhalt"
