@@ -132,11 +132,11 @@ class CausalMediationHarness:
             )
 
         # Allocate explicit VRAM headroom per 11GB GPU (reserving ~1.5 GB for activations & hooks)
-        num_gpus = torch.cuda.device_count()
-        if num_gpus > 1:
-            max_memory = {i: "9.5GiB" for i in range(num_gpus)}
-        else:
-            max_memory = {0: "40GiB"}
+        # num_gpus = torch.cuda.device_count()
+        # if num_gpus > 1:
+        #     max_memory = {i: "9.5GiB" for i in range(num_gpus)}
+        # else:
+        #     max_memory = {0: "40GiB"}
 
         dtype = torch.float16
         print(f"[Harness Init] Loading model with dtype={dtype}...", now())
@@ -145,7 +145,7 @@ class CausalMediationHarness:
             model_name_or_path,
             torch_dtype=dtype,
             device_map="auto",
-            max_memory=max_memory,
+            # max_memory=max_memory,
             trust_remote_code=True,
         )
         self.model.eval()

@@ -25,7 +25,7 @@ cleanup_gpu() {
 #    --model_name m42-health/Llama3-Med42-8B \
 #    --n_samples 100 \
 #    --top_k 20 \
-#    --head_batch_size 16 \
+#    --head_batch_size 32 \
 #    --k_values 5 10 15 20 30 50 \
 #    --denom_thresholds 0.0001 0.001 0.01 0.1 \
 #    --bootstrap_samples 2000 \
@@ -55,7 +55,7 @@ cleanup_gpu() {
 #    --model_name google/medgemma-4b-it \
 #    --n_samples 100 \
 #    --top_k 20 \
-#    --head_batch_size 16 \
+#    --head_batch_size 32 \
 #    --k_values 5 10 15 20 30 50 \
 #    --denom_thresholds 0.0001 0.001 0.01 0.1 \
 #    --bootstrap_samples 2000 \
@@ -85,7 +85,7 @@ cleanup_gpu() {
 #    --model_name mistralai/Mistral-7B-Instruct-v0.3 \
 #    --n_samples 100 \
 #    --top_k 20 \
-#    --head_batch_size 16 \
+#    --head_batch_size 32 \
 #    --k_values 5 10 15 20 30 50 \
 #    --denom_thresholds 0.0001 0.001 0.01 0.1 \
 #    --bootstrap_samples 2000 \
@@ -116,7 +116,7 @@ cleanup_gpu() {
 #    --is_qwen \
 #    --n_samples 100 \
 #    --top_k 20 \
-#    --head_batch_size 16 \
+#    --head_batch_size 32 \
 #    --k_values 5 10 15 20 30 50 \
 #    --denom_thresholds 0.0001 0.001 0.01 0.1 \
 #    --bootstrap_samples 2000 \
@@ -147,9 +147,9 @@ python "$SCRIPT" \
     --n_samples 100 \
     --top_k 20 \
 #    In ADA, take head_batch_size as 8
-    --head_batch_size 8 \
+#    --head_batch_size 8 \
 #    Otherwise in bigger compute, take head_batch_size as 16
-#    --head_batch_size 16 \
+    --head_batch_size 32 \
     --k_values 5 10 15 20 30 50 \
     --denom_thresholds 0.0001 0.001 0.01 0.1 \
     --bootstrap_samples 2000 \
