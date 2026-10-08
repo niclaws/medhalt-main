@@ -10,7 +10,7 @@ set -uo pipefail   # no `set -e`: one failed model must not stop the others
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TORCH_CUDNN_V8_API_ENABLED=1
 
-PROJECT_DIR="${PROJECT_DIR:-$HOME/projects/medhalt-main}"   # $HOME expands; "~" inside quotes does not
+PROJECT_DIR="${PROJECT_DIR:-/scratch/adityasrikar.c/projects/medhalt-main}"   # $HOME expands; "~" inside quotes does not
 SCRIPT="$PROJECT_DIR/run_casual_transfer.py"
 SCRATCH="${SCRATCH_DIR:-/scratch/adityasrikar.c/medhalt}"
 RESULTS="$SCRATCH/results_v4"   # v4 checkpoints are not compatible with earlier versions
