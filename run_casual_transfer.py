@@ -1,2002 +1,1019 @@
-import matplotlib.pyplot as plt
-from datetime import datetime
-import os
-import re
-import ast
-import json
+"""
+run_casual_transfer.py — Med-HALT cross-task causal transfer and hallucination
+mitigation, end to end, with stage-level checkpoint/resume.
+
+Tasks and what their contrastive pairs mean
+-------------------------------------------
+FCT        (hallucination)  clean: question + options.
+                            corrupt: same + "Note: Experts state the answer is X"
+                            (X = Med-HALT's wrong student answer). Truth unchanged.
+NOTA       (hallucination)  correct option is "None of the above" in both runs.
+                            clean: the other options are replaced by distractors
+                            from unrelated questions (implausible).
+                            corrupt: the original plausible distractors.
+                            The error = picking a plausible-but-wrong option.
+                            halluc token = the distractor the model prefers on the
+                            corrupt run. This no longer duplicates FCT's hint.
+PMID2Title (counterfactual) PMID A vs PMID B; each run has its own correct title.
+Title2URL  (counterfactual) title A vs title B; each run has its own correct PMID.
+           Counterfactual pairs measure identity routing, NOT hallucination, and
+           are reported separately (pair_type column). Both runs must be answered
+           correctly for a pair to be kept, so expect few valid pairs for 7-8B
+           models, which mostly do not memorise PMIDs.
+
+Validity (recorded per pair in pair_validation.csv with a reason):
+  hallucination : clean run correct (argmax over candidate set) with margin, and
+                  denom = d_clean - d_corrupt >= --min_denom (sign recorded).
+  counterfactual: clean run picks its answer, corrupt run picks ITS answer,
+                  both with margin, and denom >= --min_denom.
+"hallucinated" = the corrupt run is actually wrong; rescue rates use only these.
+
+Layer-level mitigation (safe_layer_steering.py) runs right after the splits:
+safe-layer selection, cross-task safe-layer ranking, risk-gated safe-layer
+steering, and before/after hallucination tables.  Component-level discovery,
+harm-aware circuits and causal transfer follow.
+
+Splits: valid pairs are split (stratified by hallucinated) into discovery /
+validation / test.  Circuits, steering vectors and router features come from
+discovery; lambda, alpha and the router threshold from validation; every
+reported number from test, with identical test samples for every method.
+"""
+
+from __future__ import annotations
+
 import argparse
+import ast
+import hashlib
+import json
+import os
 import random
+import re
+from typing import Dict, List, Optional, Sequence
+
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
-from tqdm import tqdm
-
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from medhalt.prompts.utils import get_samples
-from patching_engine import CenteredKernelAlignment
 
-from zoneinfo import ZoneInfo
+import experiment_runner as ER
+import safe_layer_steering as SL
+from patching_engine import CausalEngine, log
 
-IST = ZoneInfo("Asia/Kolkata")
-
-
-def now():
-    return datetime.now(IST)
+TASKS = {"FCT": "FCT", "NOTA": "Nota", "PMID2Title": "pmid2title", "Title2URL": "title2pub"}
+PAIR_TYPE = {"FCT": "hallucination", "NOTA": "hallucination", "PMID2Title": "counterfactual", "Title2URL": "counterfactual"}
+HF_REPO = "openlifescienceai/Med-HALT"
+HF_FILES = {
+    "FCT": "reasoning_FCT/reasoning_FCT.csv",
+    "Nota": "reasoning_nota/reasoning_nota.csv",
+    "pmid2title": "IR_pmid2title/IR_pmid2title.csv",
+    "title2pub": "IR_title2pubmedlink/IR_title2pubmedlink.csv",
+}
+LETTERS = "ABCDE"
+MCQ_INSTRUCTION = (
+    "Answer the following multiple-choice medical question. "
+    "Reply with the letter of the correct option."
+)
 
 
 # =====================================================================
-# 1. Contrastive Dataset Pair Builder
+# Raw data
 # =====================================================================
 
 
-class MedHALTPairBuilder:
-    VALID_OPTION_LABELS = {"A", "B", "C", "D", "E"}
+def load_raw(name: str, source: str, data_dir: Optional[str]) -> List[Dict]:
+    if source == "medhalt":
+        from medhalt.prompts.utils import get_samples
 
-    def __init__(self, tokenizer, model_type: str = "default", seed: int = 42):
-        self.tokenizer = tokenizer
-        self.model_type = model_type
-        self.seed = seed
+        return list(get_samples(dataset_name=name, shots=0, prompt_version="v0"))
+    if data_dir:
+        cands = [os.path.join(data_dir, HF_FILES[name]), os.path.join(data_dir, os.path.basename(HF_FILES[name]))]
+        path = next((c for c in cands if os.path.exists(c)), None)
+        if path is None:
+            raise FileNotFoundError(f"{HF_FILES[name]} not found under {data_dir}")
+    else:
+        from huggingface_hub import hf_hub_download
 
-    def format_prompt(self, user_content: str, model_type: str = "default") -> str:
-        if model_type == "qwen":
-            return (
-                "<|im_start|>system\n"
-                "You are a factual medical assistant. Give the concise direct answer "
-                "without any thinking process or inner monologue.<|im_end|>\n"
-                f"<|im_start|>user\n{user_content}<|im_end|>\n"
-                "<|im_start|>assistant\n"
-            )
-        elif model_type == "med42":
-            # Llama-3 / Med42-v2 chat template
-            return (
-                "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
-                "You are a helpful, respectful, and honest clinical assistant. "
-                "Provide the direct and concise answer.<|eot_id|>"
-                f"<|start_header_id|>user<|end_header_id|>\n\n{user_content}<|eot_id|>"
-                "<|start_header_id|>assistant<|end_header_id|>\n\n"
-            )
-        elif model_type == "gemma":
-            # Strictly end on model turn without trailing newline
-            return f"<start_of_turn>user\n{user_content}<end_of_turn>\n<start_of_turn>model\n"
-        elif model_type in {"phi", "mediphi"}:
-            # Native Phi-3 / MediPhi instruction format
-            return f"<|user|>\n{user_content}<|end|>\n" "<|assistant|>\n"
-        # Default for Mistral-7B (standard instruction format)
-        return user_content
+        path = hf_hub_download(HF_REPO, HF_FILES[name], repo_type="dataset")
+    return pd.read_csv(path).to_dict("records")
 
-    @classmethod
-    def normalize_option_label(cls, value) -> Optional[str]:
-        if value is None:
-            return None
-        cleaned = str(value).strip().upper()
-        match = re.fullmatch(r"([A-E])(?:[\).:]?)", cleaned)
-        if not match:
-            return None
-        label = match.group(1)
-        return label if label in cls.VALID_OPTION_LABELS else None
 
-    @staticmethod
-    def option_index_to_label(value) -> Optional[str]:
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            return None
+def parse_options(value) -> List[str]:
+    """Med-HALT options are dict strings with numeric keys (FCT also carries a
+    non-numeric 'correct answer' key, which is dropped)."""
+    parsed = value
+    if isinstance(value, str):
         try:
-            index = int(value)
-        except (TypeError, ValueError):
+            parsed = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            return []
+    if isinstance(parsed, dict):
+        items = sorted((int(k), str(v)) for k, v in parsed.items() if str(k).strip().isdigit())
+        return [v for _, v in items]
+    if isinstance(parsed, (list, tuple)):
+        return [str(v) for v in parsed]
+    return []
+
+
+def as_int(x) -> Optional[int]:
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
             return None
-        if 0 <= index < 5:
-            return chr(ord("A") + index)
+        return int(x)
+    except (TypeError, ValueError):
         return None
 
-    @staticmethod
-    def parse_numeric_options(options_value) -> List[str]:
-        parsed = options_value
-        if isinstance(options_value, str):
-            try:
-                parsed = ast.literal_eval(options_value)
-            except (ValueError, SyntaxError):
-                return []
 
-        if isinstance(parsed, dict):
-            numeric_items = []
-            for key, value in parsed.items():
-                key_str = str(key).strip()
-                if key_str.isdigit():
-                    numeric_items.append((int(key_str), str(value)))
-            numeric_items.sort(key=lambda x: x[0])
-            return [value for _, value in numeric_items]
-
-        if isinstance(parsed, (list, tuple)):
-            return [str(value) for value in parsed]
-
-        return []
-
-    @classmethod
-    def render_lettered_options(cls, options_value) -> Tuple[str, List[str]]:
-        values = cls.parse_numeric_options(options_value)
-        if not values:
-            return str(options_value), []
-        lines = [f"{chr(ord('A') + i)}) {text}" for i, text in enumerate(values)]
-        return "\n".join(lines), values
-
-    def encode_single_token(self, token_str: str) -> Optional[int]:
-        cleaned = str(token_str).strip()
-        if not cleaned:
-            return None
-
-        # For Gemma/Llama models, test single-token continuation directly
-        for candidate in [cleaned, " " + cleaned]:
-            tokens = self.tokenizer.encode(candidate, add_special_tokens=False)
-            # Remove leading BOS if present
-            if tokens and tokens[0] == self.tokenizer.bos_token_id:
-                tokens = tokens[1:]
-            if len(tokens) == 1:
-                return tokens[0]
-
-        tokens = self.tokenizer.encode(cleaned, add_special_tokens=False)
-        if tokens and tokens[0] == self.tokenizer.bos_token_id:
-            tokens = tokens[1:]
-        return tokens[0] if tokens else None
-
-    def get_first_distinct_url_token_pair(self, clean_pmid: str, corrupt_pmid: str):
-        clean_tokens = self.tokenizer.encode(
-            str(clean_pmid).strip(), add_special_tokens=False
-        )
-        corrupt_tokens = self.tokenizer.encode(
-            str(corrupt_pmid).strip(), add_special_tokens=False
-        )
-        if not clean_tokens or not corrupt_tokens:
-            return None
-
-        for position in range(min(len(clean_tokens), len(corrupt_tokens))):
-            if clean_tokens[position] != corrupt_tokens[position]:
-                return {
-                    "common_prefix_ids": clean_tokens[:position],
-                    "target_id": clean_tokens[position],
-                    "halluc_id": corrupt_tokens[position],
-                    "position": position,
-                    "clean_tokens": clean_tokens,
-                    "corrupt_tokens": corrupt_tokens,
-                }
-        return None
-
-    def create_pair(
-        self,
-        clean_txt: str,
-        corrupt_txt: str,
-        target_str: str,
-        halluc_str: str,
-        metadata: Optional[Dict] = None,
-    ) -> Optional[Dict]:
-        t_id = self.encode_single_token(target_str)
-        h_id = self.encode_single_token(halluc_str)
-        if t_id is None or h_id is None or t_id == h_id:
-            return None
-
-        clean_prompt = self.format_prompt(clean_txt, self.model_type)
-        corrupt_prompt = self.format_prompt(corrupt_txt, self.model_type)
-        pair = {
-            "clean_ids": self.tokenizer(clean_prompt, return_tensors="pt").input_ids,
-            "corrupt_ids": self.tokenizer(
-                corrupt_prompt, return_tensors="pt"
-            ).input_ids,
-            "target_id": t_id,
-            "halluc_id": h_id,
-            "target_text": str(target_str),
-            "halluc_text": str(halluc_str),
-        }
-        if metadata:
-            pair.update(metadata)
-        return pair
-
-    def prepare_dataset(
-        self,
-        task_name: str,
-        n_samples: int = 50,
-        task_seed: Optional[int] = None,
-    ) -> List[Dict]:
-        raw_samples = list(
-            get_samples(dataset_name=task_name, shots=0, prompt_version="v0")
-        )
-        seed = self.seed if task_seed is None else task_seed
-        rng = random.Random(seed)
-        rng.shuffle(raw_samples)
-        pairs: List[Dict] = []
-
-        if task_name in {"pmid2title", "title2pub"}:
-            real_samples = [
-                s
-                for s in raw_samples
-                if str(s.get("pubmed_data_type", "")).lower() == "real_data"
-                and str(s.get("is_paper_exists", "")).lower() == "yes"
-                and pd.notna(s.get("PMID"))
-                and pd.notna(s.get("Title"))
-                and str(s.get("PMID", "")).strip()
-                and str(s.get("Title", "")).strip()
-            ]
-            rng.shuffle(real_samples)
-            used_pmids = set()
-
-            for i, clean_sample in enumerate(real_samples):
-                if len(pairs) >= n_samples:
-                    break
-
-                clean_pmid = str(clean_sample["PMID"]).strip()
-                clean_title = str(clean_sample["Title"]).strip()
-                if clean_pmid in used_pmids:
-                    continue
-
-                for j, corrupt_sample in enumerate(real_samples):
-                    if i == j:
-                        continue
-
-                    corrupt_pmid = str(corrupt_sample["PMID"]).strip()
-                    corrupt_title = str(corrupt_sample["Title"]).strip()
-                    if corrupt_pmid in used_pmids or corrupt_pmid == clean_pmid:
-                        continue
-
-                    if task_name == "pmid2title":
-                        target_word = clean_title.split()[0]
-                        halluc_word = corrupt_title.split()[0]
-                        target_id = self.encode_single_token(target_word)
-                        halluc_id = self.encode_single_token(halluc_word)
-                        if (
-                            target_id is None
-                            or halluc_id is None
-                            or target_id == halluc_id
-                        ):
-                            continue
-
-                        clean = f"Provide the title of PubMed paper with PMID {clean_pmid}:\nTitle:"
-                        corrupt = f"Provide the title of PubMed paper with PMID {corrupt_pmid}:\nTitle:"
-                        pair = self.create_pair(
-                            clean,
-                            corrupt,
-                            target_word,
-                            halluc_word,
-                            metadata={
-                                "sample_id": f"{clean_pmid}__vs__{corrupt_pmid}",
-                                "clean_ref": clean_pmid,
-                                "corrupt_ref": corrupt_pmid,
-                            },
-                        )
-                        if pair is None:
-                            continue
-
-                    else:
-                        divergence = self.get_first_distinct_url_token_pair(
-                            clean_pmid, corrupt_pmid
-                        )
-                        if divergence is None:
-                            continue
-
-                        common_prefix_ids = divergence["common_prefix_ids"]
-                        target_id = divergence["target_id"]
-                        halluc_id = divergence["halluc_id"]
-
-                        clean = (
-                            f"Article Title: {clean_title}\n"
-                            "PubMed Link URL: https://pubmed.ncbi.nlm.nih.gov/"
-                        )
-                        corrupt = (
-                            f"Article Title: {corrupt_title}\n"
-                            "PubMed Link URL: https://pubmed.ncbi.nlm.nih.gov/"
-                        )
-
-                        clean_ids = self.tokenizer(
-                            self.format_prompt(clean, self.model_type),
-                            return_tensors="pt",
-                        ).input_ids
-                        corrupt_ids = self.tokenizer(
-                            self.format_prompt(corrupt, self.model_type),
-                            return_tensors="pt",
-                        ).input_ids
-
-                        if common_prefix_ids:
-                            shared_prefix = torch.tensor(
-                                [common_prefix_ids], dtype=clean_ids.dtype
-                            )
-                            clean_ids = torch.cat([clean_ids, shared_prefix], dim=1)
-                            corrupt_ids = torch.cat([corrupt_ids, shared_prefix], dim=1)
-
-                        pair = {
-                            "clean_ids": clean_ids,
-                            "corrupt_ids": corrupt_ids,
-                            "target_id": target_id,
-                            "halluc_id": halluc_id,
-                            "target_text": clean_pmid,
-                            "halluc_text": corrupt_pmid,
-                            "sample_id": f"{clean_pmid}__vs__{corrupt_pmid}",
-                            "clean_ref": clean_pmid,
-                            "corrupt_ref": corrupt_pmid,
-                            "pmid_token_position": divergence["position"],
-                            "shared_prefix_length": len(common_prefix_ids),
-                        }
-
-                    pairs.append(pair)
-                    used_pmids.add(clean_pmid)
-                    used_pmids.add(corrupt_pmid)
-                    break
-
-            return pairs
-
-        for sample_idx, sample in enumerate(raw_samples):
-            if len(pairs) >= n_samples:
-                break
-
-            sample_id = str(sample.get("id", f"{task_name}_{sample_idx}"))
-            q = sample.get("question", "")
-            rendered_options, option_values = self.render_lettered_options(
-                sample.get("options", "")
-            )
-
-            if not option_values:
-                continue
-
-            if task_name == "FCT":
-                correct = self.option_index_to_label(sample.get("correct_index"))
-                suggested_wrong = self.option_index_to_label(
-                    sample.get("student_index")
-                )
-
-                if (
-                    correct is None
-                    or suggested_wrong is None
-                    or correct == suggested_wrong
-                    or int(sample.get("correct_index")) >= len(option_values)
-                    or int(sample.get("student_index")) >= len(option_values)
-                ):
-                    continue
-
-                clean = f"Question: {q}\nOptions:\n{rendered_options}\nAnswer:"
-                corrupt = (
-                    f"Question: {q}\n"
-                    f"Options:\n{rendered_options}\n"
-                    f"Note: Experts state the answer is {suggested_wrong}.\n"
-                    "Answer:"
-                )
-
-                pair = self.create_pair(
-                    clean,
-                    corrupt,
-                    correct,
-                    suggested_wrong,
-                    metadata={
-                        "sample_id": sample_id,
-                        "correct_index": int(sample.get("correct_index")),
-                        "contrast_index": int(sample.get("student_index")),
-                        "correct_answer_text": str(sample.get("correct_answer", "")),
-                        "contrast_answer_text": str(sample.get("student_answer", "")),
-                    },
-                )
-
-            elif task_name == "Nota":
-                correct_index_raw = sample.get("correct_index")
-                correct = self.option_index_to_label(correct_index_raw)
-
-                if correct is None:
-                    continue
-
-                try:
-                    correct_index = int(correct_index_raw)
-                except (TypeError, ValueError):
-                    continue
-
-                if not (0 <= correct_index < len(option_values)):
-                    continue
-
-                alternate_index = None
-                for field in ("student_index", "distractor_index"):
-                    value = sample.get(field)
-                    if value is not None and not (
-                        isinstance(value, float) and np.isnan(value)
-                    ):
-                        try:
-                            candidate = int(value)
-                        except (TypeError, ValueError):
-                            continue
-                        if (
-                            0 <= candidate < len(option_values)
-                            and candidate != correct_index
-                        ):
-                            alternate_index = candidate
-                            break
-
-                if alternate_index is None:
-                    for candidate in range(len(option_values)):
-                        if candidate != correct_index:
-                            alternate_index = candidate
-                            break
-
-                distractor = self.option_index_to_label(alternate_index)
-                if distractor is None or distractor == correct:
-                    continue
-
-                clean = f"Question: {q}\nOptions:\n{rendered_options}\nAnswer:"
-                corrupt = (
-                    f"Question: {q}\n"
-                    f"Options:\n{rendered_options}\n"
-                    f"Hint: The answer is {distractor}.\n"
-                    "Answer:"
-                )
-
-                pair = self.create_pair(
-                    clean,
-                    corrupt,
-                    correct,
-                    distractor,
-                    metadata={
-                        "sample_id": sample_id,
-                        "correct_index": correct_index,
-                        "contrast_index": alternate_index,
-                        "correct_answer_text": str(sample.get("correct_answer", "")),
-                        "contrast_answer_text": option_values[alternate_index],
-                    },
-                )
-            else:
-                raise ValueError(f"Unsupported task_name={task_name!r}")
-
-            if pair is not None:
-                pairs.append(pair)
-
-        return pairs
+def render_options(opts: Sequence[str]) -> str:
+    return "\n".join(f"{LETTERS[i]}) {o}" for i, o in enumerate(opts))
 
 
 # =====================================================================
-# 2. Optimized Causal Engine with Extraction & Intervention Hooks
+# Pair construction (tokenizer-aware)
 # =====================================================================
 
 
-class CausalEngine:
-    def __init__(self, model_name: str, is_qwen: bool = False):
-        print(f"\n[Engine] Loading {model_name}...", now())
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name, padding_side="left", trust_remote_code=True
-        )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+def finalize_pair(
+    engine: CausalEngine,
+    clean_user: str,
+    corrupt_user: str,
+    prefill: str,
+    cand_strings: Sequence[str],
+    cand_labels: Sequence[str],
+    halluc_idx: Optional[int],
+    mode: str,
+) -> Dict:
+    """Tokenise answers in context and locate the scored position.
 
-        # Allocate explicit VRAM headroom per 11GB GPU (reserving ~1.5 GB for activations & hooks)
-        # num_gpus = torch.cuda.device_count()
-        # if num_gpus > 1:
-        #     max_memory = {i: "9.5GiB" for i in range(num_gpus)}
-        # else:
-        #     max_memory = {0: "40GiB"}
+    candidate 0 is the target. mode='all': shared prefix over all candidates
+    (MCQ letters). mode='pair': shared prefix of target and hallucination; other
+    candidates are kept only if they share it.  The shared prefix is appended
+    to both prompts so the scored token is the first one where answers diverge.
+    Returns {} with 'reject' set if the pair cannot be scored."""
+    ct = engine.render_prompt(clean_user, prefill)
+    xt = engine.render_prompt(corrupt_user, prefill)
+    cid, xid = engine.encode(ct), engine.encode(xt)
+    conts = []
+    for s in cand_strings:
+        a = engine.continuation_ids(ct, cid, s)
+        b = engine.continuation_ids(xt, xid, s)
+        conts.append(a if (a is not None and a == b) else None)
+    if conts[0] is None or (halluc_idx is not None and conts[halluc_idx] is None):
+        return {"reject": "answer_tokenization_mismatch"}
 
-        dtype = torch.float16
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=dtype,
-            device_map="auto",
-            # max_memory=max_memory,
-            trust_remote_code=True,
-        )
-        self.model.eval()
+    def cp(a, b):
+        n = 0
+        while n < min(len(a), len(b)) and a[n] == b[n]:
+            n += 1
+        return n
 
-        # 1. Direct path lookup prioritizing the Language Model text backbone
-        layers_module = None
-        for attr_path in [
-            (
-                "model",
-                "language_model",
-                "model",
-                "layers",
-            ),  # Gemma-3 multimodal wrapper
-            ("language_model", "model", "layers"),  # Gemma-3 text backbone
-            ("model", "text_model", "layers"),  # Gemma-3 variant
-            ("model", "layers"),  # Standard LLaMA / Mistral / Qwen / Baichuan
-            ("layers",),
-        ]:
-            curr = self.model
-            for step in attr_path:
-                curr = getattr(curr, step, None)
-                if curr is None:
-                    break
-            if (
-                curr is not None
-                and isinstance(curr, (torch.nn.ModuleList, list))
-                and len(curr) > 0
-            ):
-                layers_module = curr
-                print(
-                    f"[Engine] Found language decoder layers via direct path: {'.'.join(attr_path)} (Length: {len(curr)})",
-                    now(),
-                )
-                break
-
-        # 2. Resilient traversal: exclude vision tower and pick the largest decoder ModuleList
-        if layers_module is None:
-            candidate_lists = []
-            for name, module in self.model.named_modules():
-                # Explicitly ignore vision encoder modules
-                if (
-                    "vision" in name.lower()
-                    or "image" in name.lower()
-                    or "projector" in name.lower()
-                ):
-                    continue
-                if (
-                    name.endswith("layers")
-                    and isinstance(module, torch.nn.ModuleList)
-                    and len(module) > 0
-                ):
-                    sample_block = module[0]
-                    if hasattr(sample_block, "self_attn") or hasattr(
-                        sample_block, "mlp"
-                    ):
-                        candidate_lists.append((len(module), name, module))
-
-            if candidate_lists:
-                candidate_lists.sort(key=lambda x: x[0], reverse=True)
-                layers_module = candidate_lists[0][2]
-                print(
-                    f"[Engine] Selected language layers: '{candidate_lists[0][1]}' (Length: {len(layers_module)})",
-                    now(),
-                )
-
-        if layers_module is None:
-            raise AttributeError(
-                f"Could not locate text decoder layers for '{model_name}'."
-            )
-
-        self.layers = layers_module
-
-        # Resolve config parameters accurately for standard and multimodal models
-        cfg = getattr(self.model.config, "text_config", self.model.config)
-        self.num_layers = len(self.layers)
-
-        # 1. Resolve head_dim
-        self.head_dim = getattr(cfg, "head_dim", None)
-        hidden_sz = getattr(cfg, "hidden_size", None)
-
-        # 2. Resolve attention head count strictly matching self_attn projection dimension
-        # Check explicit query head counts first
-        num_heads = getattr(cfg, "num_attention_heads", None)
-
-        # In Gemma-3 / GQA models, ensure num_heads * head_dim == hidden_size
-        if hidden_sz is not None and self.head_dim is not None:
-            derived_heads = hidden_sz // self.head_dim
-            if num_heads is None or (num_heads * self.head_dim != hidden_sz):
-                print(
-                    f"[Engine Fix] Correcting num_heads from {num_heads} to {derived_heads} "
-                    f"(hidden_size={hidden_sz}, head_dim={self.head_dim})",
-                    now(),
-                )
-                num_heads = derived_heads
-
-        if self.head_dim is None and hidden_sz is not None and num_heads is not None:
-            self.head_dim = hidden_sz // num_heads
-
-        self.num_heads = num_heads
-
-        print(
-            f"[Engine] Model Loaded. Verified Layers: {self.num_layers}, "
-            f"Query Heads: {self.num_heads}, Head Dim: {self.head_dim}, Hidden Dim: {hidden_sz}",
-            now(),
-        )
-
-    def get_logit_diff(
-        self, input_ids: torch.Tensor, target_id: int, halluc_id: int
-    ) -> float:
-        with torch.inference_mode():
-            outputs = self.model(input_ids.to(self.model.device))
-            last_logits = outputs.logits[0, -1, :]
-            return (last_logits[target_id] - last_logits[halluc_id]).item()
-
-    def cache_clean_activations(
-        self, clean_ids: torch.Tensor
-    ) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
-        head_cache = {}
-        mlp_cache = {}
-        hooks = []
-
-        def get_attn_hook(l):
-            def hook(module, inp, outp):
-                act = outp[0] if isinstance(outp, tuple) else outp
-                head_cache[l] = (
-                    act.detach().cpu()
-                )  # Offload to CPU cache to protect 11GB VRAM
-
-            return hook
-
-        def get_mlp_hook(l):
-            def hook(module, inp, outp):
-                act = outp[0] if isinstance(outp, tuple) else outp
-                mlp_cache[l] = act.detach().cpu()  # Offload to CPU cache
-
-            return hook
-
-        for l in range(self.num_layers):
-            hooks.append(
-                self.layers[l].self_attn.register_forward_hook(get_attn_hook(l))
-            )
-            hooks.append(self.layers[l].mlp.register_forward_hook(get_mlp_hook(l)))
-
-        with torch.inference_mode():
-            self.model(clean_ids.to(self.model.device))
-
-        for h in hooks:
-            h.remove()
-
-        return head_cache, mlp_cache
-
-    def extract_task_representations(
-        self, samples: List[Dict], max_samples: int = 50
-    ) -> Dict[int, torch.Tensor]:
-        """Extracts token decision representations across all layers for CKA."""
-        layer_reps = {l: [] for l in range(self.num_layers)}
-        eval_samples = samples[:max_samples]
-        device = self.model.device
-
-        for sample in eval_samples:
-            clean_ids = sample["clean_ids"].to(device)
-            sample_cache = {}
-            hooks = []
-
-            def make_hook(layer_i):
-                def hook_fn(module, inp, outp):
-                    # Handle Gemma-3 tuple unpack safely
-                    if isinstance(outp, tuple):
-                        act = outp[0]
-                    else:
-                        act = outp
-
-                    # Ensure act is a 3D tensor [B, S, D]
-                    if hasattr(act, "last_hidden_state"):
-                        act = act.last_hidden_state
-
-                    sample_cache[layer_i] = (
-                        act[:, -1, :].detach().to(torch.float32).cpu()
-                    )
-
-                return hook_fn
-
-            for l in range(self.num_layers):
-                hooks.append(self.layers[l].register_forward_hook(make_hook(l)))
-
-            with torch.inference_mode():
-                self.model(clean_ids)
-
-            for h in hooks:
-                h.remove()
-
-            for l in range(self.num_layers):
-                layer_reps[l].append(sample_cache[l])
-
-        return {l: torch.cat(layer_reps[l], dim=0) for l in range(self.num_layers)}
-
-    def patch_heads_layer_batched(
-        self,
-        corrupt_ids: torch.Tensor,
-        target_id: int,
-        halluc_id: int,
-        layer_idx: int,
-        clean_act: torch.Tensor,
-        chunk_size: int = 32,
-    ) -> np.ndarray:
-        target_diffs = np.zeros(self.num_heads, dtype=np.float32)
-        total_heads = self.num_heads
-        first_device = self.model.device
-        layer_device = next(self.layers[layer_idx].parameters()).device
-
-        for start_idx in range(0, total_heads, chunk_size):
-            end_idx = min(start_idx + chunk_size, total_heads)
-            active_heads = list(range(start_idx, end_idx))
-            batch_k = len(active_heads)
-
-            batched_corrupt = corrupt_ids.repeat(batch_k, 1).to(first_device)
-
-            def batched_patch_hook(module, inp, outp):
-                curr = outp[0].clone() if isinstance(outp, tuple) else outp.clone()
-                B, S, hidden = curr.shape
-                clean = clean_act.to(curr.device)
-                Bc, Sc, _ = clean.shape
-
-                curr_reshaped = curr.reshape(B, S, self.num_heads, self.head_dim)
-                clean_reshaped = clean.reshape(Bc, Sc, self.num_heads, self.head_dim)
-
-                for b_idx, h_idx in enumerate(active_heads):
-                    if S != Sc:
-                        curr_reshaped[b_idx, -1, h_idx, :] = clean_reshaped[
-                            0, -1, h_idx, :
-                        ]
-                    else:
-                        curr_reshaped[b_idx, :, h_idx, :] = clean_reshaped[
-                            0, :, h_idx, :
-                        ]
-
-                patched = curr_reshaped.reshape(B, S, hidden)
-                return (patched,) + outp[1:] if isinstance(outp, tuple) else patched
-
-            handle = self.layers[layer_idx].self_attn.register_forward_hook(
-                batched_patch_hook
-            )
-            with torch.inference_mode():
-                outputs = self.model(batched_corrupt)
-                logits = outputs.logits[:, -1, :]
-                diffs = (
-                    (logits[:, target_id] - logits[:, halluc_id]).float().cpu().numpy()
-                )
-
-            handle.remove()
-            target_diffs[start_idx:end_idx] = diffs
-
-        return target_diffs
-
-    def patch_single_component(
-        self,
-        corrupt_ids: torch.Tensor,
-        target_id: int,
-        halluc_id: int,
-        comp_type: str,
-        layer_idx: int,
-        clean_act: torch.Tensor,
-    ) -> float:
-        def hook_fn(module, inp, outp):
-            if clean_act.shape[1] != outp.shape[1]:
-                curr = outp.clone()
-                curr[:, -1, :] = clean_act[:, -1, :].to(outp.device)
-                return curr
-            return clean_act.to(outp.device)
-
-        handle = self.layers[layer_idx].mlp.register_forward_hook(hook_fn)
-        with torch.inference_mode():
-            outputs = self.model(corrupt_ids.to(self.model.device))
-            logits = outputs.logits[0, -1, :]
-            patched_diff = (logits[target_id] - logits[halluc_id]).item()
-
-        handle.remove()
-        return patched_diff
-
-
-# =====================================================================
-# 3. Discovery & Evaluation Logic
-# =====================================================================
-
-
-def bootstrap_mean_ci(values, n_bootstrap=2000, confidence=0.95, seed=42):
-    arr = np.asarray(values, dtype=float)
-    arr = arr[np.isfinite(arr)]
-    if len(arr) == 0:
-        return np.nan, np.nan
-    if len(arr) == 1:
-        return float(arr[0]), float(arr[0])
-    if n_bootstrap <= 0:
-        return np.nan, np.nan
-
-    rng = np.random.default_rng(seed)
-    indices = rng.integers(0, len(arr), size=(n_bootstrap, len(arr)))
-    means = arr[indices].mean(axis=1)
-    alpha = 1.0 - confidence
-    return (
-        float(np.quantile(means, alpha / 2.0)),
-        float(np.quantile(means, 1.0 - alpha / 2.0)),
-    )
-
-
-def rank_components(head_aie: np.ndarray, mlp_aie: np.ndarray) -> List[Dict]:
-    ranked = []
-    num_layers, num_heads = head_aie.shape
-    for layer in range(num_layers):
-        for head in range(num_heads):
-            score = float(head_aie[layer, head])
-            ranked.append(
-                {
-                    "component": ("head", layer, head),
-                    "label": f"L{layer}H{head}",
-                    "component_type": "head",
-                    "layer": layer,
-                    "head": head,
-                    "aie": score,
-                    "abs_aie": abs(score),
-                }
-            )
-        score = float(mlp_aie[layer])
-        ranked.append(
-            {
-                "component": ("mlp", layer, None),
-                "label": f"L{layer}MLP",
-                "component_type": "mlp",
-                "layer": layer,
-                "head": None,
-                "aie": score,
-                "abs_aie": abs(score),
-            }
-        )
-
-    ranked.sort(key=lambda row: row["abs_aie"], reverse=True)
-    for rank, row in enumerate(ranked, 1):
-        row["rank"] = rank
-    return ranked
-
-
-def circuit_from_ranking(ranking: List[Dict], k: int):
-    selected = ranking[:k]
-    return (
-        [row["component"] for row in selected],
-        [row["label"] for row in selected],
-        [float(row["aie"]) for row in selected],
-    )
-
-
-def circuit_similarity(labels_a: List[str], labels_b: List[str]) -> Dict[str, float]:
-    a, b = set(labels_a), set(labels_b)
-    inter = len(a & b)
-    union = len(a | b)
-    denom = len(a) + len(b)
-    min_size = min(len(a), len(b))
-    return {
-        "intersection": inter,
-        "union": union,
-        "jaccard": inter / union if union else np.nan,
-        "dice": (2 * inter / denom) if denom else np.nan,
-        "overlap_coefficient": inter / min_size if min_size else np.nan,
-    }
-
-
-def summarize_transfer_rows(
-    rows: List[Dict],
-    threshold: float,
-    n_bootstrap: int = 2000,
-    confidence: float = 0.95,
-    seed: int = 42,
-) -> Dict[str, object]:
-    usable = [
-        row
-        for row in rows
-        if row.get("patched", False)
-        and abs(float(row["denominator"])) >= threshold
-        and np.isfinite(float(row["normalized_transfer"]))
+    if mode == "all":
+        if any(c is None for c in conts):
+            return {"reject": "option_tokenization_mismatch"}
+        p = min(cp(conts[0], c) for c in conts[1:])
+    else:
+        p = cp(conts[0], conts[halluc_idx])
+    prefix = conts[0][:p]
+    order = [0] + ([halluc_idx] if halluc_idx is not None else []) + [
+        i for i in range(1, len(conts)) if i != halluc_idx
     ]
-
-    total_count = len(rows)
-    if not usable:
-        return {
-            "mean": np.nan,
-            "median": np.nan,
-            "std": np.nan,
-            "q25": np.nan,
-            "q75": np.nan,
-            "min": np.nan,
-            "max": np.nan,
-            "mean_abs": np.nan,
-            "positive_rate": np.nan,
-            "negative_rate": np.nan,
-            "overshoot_rate": np.nan,
-            "mean_raw_restoration": np.nan,
-            "mean_clean_corrupt_gap": np.nan,
-            "bootstrap_mean_ci_low": np.nan,
-            "bootstrap_mean_ci_high": np.nan,
-            "valid_count": 0,
-            "dropped_count": total_count,
-            "valid_fraction": 0.0,
-        }
-
-    scores = np.asarray([row["normalized_transfer"] for row in usable], dtype=float)
-    raw = np.asarray([row["raw_restoration"] for row in usable], dtype=float)
-    gaps = np.asarray([row["denominator"] for row in usable], dtype=float)
-    ci_low, ci_high = bootstrap_mean_ci(
-        scores,
-        n_bootstrap=n_bootstrap,
-        confidence=confidence,
-        seed=seed,
-    )
+    toks, keep_labels, new_h, used = [], [], None, set()
+    for i in order:
+        c = conts[i]
+        if c is None or len(c) <= p or c[:p] != prefix or c[p] in used:
+            if i == 0 or i == halluc_idx or mode == "all":
+                return {"reject": "answer_tokens_not_distinct"}
+            continue
+        used.add(c[p])
+        if i == halluc_idx:
+            new_h = len(toks)
+        toks.append(c[p])
+        keep_labels.append(cand_labels[i])
+    if len(toks) < 2:
+        return {"reject": "fewer_than_two_candidates"}
     return {
-        "mean": float(np.mean(scores)),
-        "median": float(np.median(scores)),
-        "std": float(np.std(scores, ddof=1)) if len(scores) > 1 else 0.0,
-        "q25": float(np.quantile(scores, 0.25)),
-        "q75": float(np.quantile(scores, 0.75)),
-        "min": float(np.min(scores)),
-        "max": float(np.max(scores)),
-        "mean_abs": float(np.mean(np.abs(scores))),
-        "positive_rate": float(np.mean(scores > 0)),
-        "negative_rate": float(np.mean(scores < 0)),
-        "overshoot_rate": float(np.mean(scores > 1)),
-        "mean_raw_restoration": float(np.mean(raw)),
-        "mean_clean_corrupt_gap": float(np.mean(gaps)),
-        "bootstrap_mean_ci_low": ci_low,
-        "bootstrap_mean_ci_high": ci_high,
-        "valid_count": int(len(scores)),
-        "dropped_count": int(total_count - len(scores)),
-        "valid_fraction": float(len(scores) / max(1, total_count)),
+        "clean_ids": cid + prefix,
+        "corrupt_ids": xid + prefix,
+        "gen_clean_ids": cid,
+        "gen_corrupt_ids": xid,
+        "cand_ids": toks,
+        "cand_labels": keep_labels,
+        "halluc_idx": new_h,
+        "shared_prefix_len": p,
     }
 
 
-def discover_circuit(
-    engine: CausalEngine,
-    dataset: List[Dict],
-    min_denom: float = 1e-4,
-    head_batch_size: int = 32,
-) -> Dict[str, object]:
-    sample_rows = []
-    per_sample_head = []
-    per_sample_mlp = []
-    valid_denoms = []
-
-    print(
-        f"\n[Discovery] Starting vectorized discovery on {len(dataset)} samples...",
-        now(),
-    )
-
-    for idx, sample in enumerate(
-        tqdm(dataset, desc="Scanning Components", leave=False)
-    ):
-        clean_ids = sample["clean_ids"]
-        corrupt_ids = sample["corrupt_ids"]
-        t_id = sample["target_id"]
-        h_id = sample["halluc_id"]
-
-        d_clean = engine.get_logit_diff(clean_ids, t_id, h_id)
-        d_corrupt = engine.get_logit_diff(corrupt_ids, t_id, h_id)
-        denom = d_clean - d_corrupt
-
-        base = {
-            "sample_index": idx,
-            "sample_id": sample.get("sample_id", str(idx)),
-            "target_text": sample.get("target_text", ""),
-            "halluc_text": sample.get("halluc_text", ""),
-            "target_id": t_id,
-            "halluc_id": h_id,
-            "d_clean": d_clean,
-            "d_corrupt": d_corrupt,
-            "denominator": denom,
-            "abs_denominator": abs(denom),
-            "used_at_min_threshold": abs(denom) >= min_denom,
-        }
-        sample_rows.append(base)
-
-        if abs(denom) < min_denom:
+def build_mcq_pairs(engine, task: str, rows: List[Dict], n: int, rng: random.Random, stats: Dict) -> List[Dict]:
+    rows = list(rows)
+    rng.shuffle(rows)
+    pairs = []
+    # pool of distractor texts for NOTA's implausible clean condition
+    pool = []
+    if task == "NOTA":
+        for r in rows:
+            opts = parse_options(r.get("options"))
+            ci = as_int(r.get("correct_index"))
+            for j, o in enumerate(opts):
+                if j != ci and "none of the above" not in o.lower():
+                    pool.append((str(r.get("subject_name", "")), o))
+    for r in rows:
+        if len(pairs) >= n:
+            break
+        opts = parse_options(r.get("options"))
+        ci = as_int(r.get("correct_index"))
+        q = str(r.get("question", "")).strip()
+        if not q or len(opts) < 2 or len(opts) > len(LETTERS) or ci is None or not (0 <= ci < len(opts)):
+            stats["malformed"] = stats.get("malformed", 0) + 1
             continue
-
-        head_cache, mlp_cache = engine.cache_clean_activations(clean_ids)
-        head_effect = np.zeros((engine.num_layers, engine.num_heads), dtype=np.float32)
-        mlp_effect = np.zeros(engine.num_layers, dtype=np.float32)
-
-        for layer in range(engine.num_layers):
-            layer_diffs = engine.patch_heads_layer_batched(
-                corrupt_ids,
-                t_id,
-                h_id,
-                layer,
-                head_cache[layer],
-                chunk_size=head_batch_size,
-            )
-            head_effect[layer, :] = (layer_diffs - d_corrupt) / denom
-
-        for layer in range(engine.num_layers):
-            d_patched = engine.patch_single_component(
-                corrupt_ids, t_id, h_id, "mlp", layer, mlp_cache[layer]
-            )
-            mlp_effect[layer] = (d_patched - d_corrupt) / denom
-
-        per_sample_head.append(head_effect)
-        per_sample_mlp.append(mlp_effect)
-        valid_denoms.append(denom)
-        del head_cache, mlp_cache
-
-    valid_count = len(valid_denoms)
-    if valid_count == 0:
-        raise RuntimeError("Circuit discovery produced zero valid samples.")
-
-    head_stack = np.stack(per_sample_head, axis=0)
-    mlp_stack = np.stack(per_sample_mlp, axis=0)
-    denom_array = np.asarray(valid_denoms, dtype=float)
-    head_aie = head_stack.mean(axis=0)
-    mlp_aie = mlp_stack.mean(axis=0)
-    ranking = rank_components(head_aie, mlp_aie)
-
-    return {
-        "head_aie": head_aie,
-        "mlp_aie": mlp_aie,
-        "ranking": ranking,
-        "valid_count": valid_count,
-        "total_count": len(dataset),
-        "valid_fraction": valid_count / max(1, len(dataset)),
-        "sample_rows": sample_rows,
-        "valid_denominators": denom_array,
-        "per_sample_head_aie": head_stack,
-        "per_sample_mlp_aie": mlp_stack,
-        "mean_abs_head_aie": float(np.mean(np.abs(head_aie))),
-        "max_abs_head_aie": float(np.max(np.abs(head_aie))),
-        "mean_abs_mlp_aie": float(np.mean(np.abs(mlp_aie))),
-        "max_abs_mlp_aie": float(np.max(np.abs(mlp_aie))),
-        "mean_clean_corrupt_gap": float(np.mean(denom_array)),
-        "std_clean_corrupt_gap": (
-            float(np.std(denom_array, ddof=1)) if valid_count > 1 else 0.0
-        ),
-    }
-
-
-def ranking_at_threshold(
-    discovery_result: Dict, threshold: float
-) -> Optional[List[Dict]]:
-    denoms = discovery_result["valid_denominators"]
-    mask = np.abs(denoms) >= threshold
-    if not np.any(mask):
-        return None
-    head = discovery_result["per_sample_head_aie"][mask].mean(axis=0)
-    mlp = discovery_result["per_sample_mlp_aie"][mask].mean(axis=0)
-    return rank_components(head, mlp)
-
-
-def evaluate_circuit_transfer(
-    engine: CausalEngine,
-    circuit: List[Tuple],
-    target_dataset: List[Dict],
-    min_denom: float = 1e-4,
-) -> Dict[str, object]:
-    per_sample_rows = []
-
-    for idx, sample in enumerate(
-        tqdm(target_dataset, desc="Evaluating Transfer", leave=False)
-    ):
-        clean_ids = sample["clean_ids"]
-        corrupt_ids = sample["corrupt_ids"]
-        t_id = sample["target_id"]
-        h_id = sample["halluc_id"]
-
-        d_clean = engine.get_logit_diff(clean_ids, t_id, h_id)
-        d_corrupt = engine.get_logit_diff(corrupt_ids, t_id, h_id)
-        denom = d_clean - d_corrupt
-
-        base = {
-            "sample_index": idx,
-            "sample_id": sample.get("sample_id", str(idx)),
-            "target_text": sample.get("target_text", ""),
-            "halluc_text": sample.get("halluc_text", ""),
-            "target_id": t_id,
-            "halluc_id": h_id,
-            "d_clean": d_clean,
-            "d_corrupt": d_corrupt,
-            "denominator": denom,
-            "abs_denominator": abs(denom),
-        }
-
-        if abs(denom) < min_denom:
-            per_sample_rows.append(
-                {
-                    **base,
-                    "patched": False,
-                    "d_patched": np.nan,
-                    "raw_restoration": np.nan,
-                    "normalized_transfer": np.nan,
-                }
-            )
+        letters = list(LETTERS[: len(opts)])
+        cand_labels = [letters[ci]] + [l for j, l in enumerate(letters) if j != ci]
+        cand_strings = [" " + l for l in cand_labels]
+        sid = str(r.get("id", f"{task}_{len(pairs)}"))
+        if task == "FCT":
+            si = as_int(r.get("student_index"))
+            if si is None or si == ci or not (0 <= si < len(opts)):
+                stats["no_wrong_student_answer"] = stats.get("no_wrong_student_answer", 0) + 1
+                continue
+            body = f"{MCQ_INSTRUCTION}\n\nQuestion: {q}\nOptions:\n{render_options(opts)}"
+            clean_u = body
+            corrupt_u = body + f"\nNote: Experts state the answer is {letters[si]}."
+            h_idx = cand_labels.index(letters[si])
+            gold = letters[ci]
+            meta = {"student_letter": letters[si]}
+        else:  # NOTA
+            if "none of the above" not in opts[ci].lower():
+                stats["correct_not_nota"] = stats.get("correct_not_nota", 0) + 1
+                continue
+            subj = str(r.get("subject_name", ""))
+            own = {o.strip().lower() for o in opts}
+            fill = []
+            for _ in range(200):
+                s2, o2 = pool[rng.randrange(len(pool))]
+                if o2.strip().lower() not in own and (s2 != subj or not subj) and o2 not in fill:
+                    fill.append(o2)
+                if len(fill) == len(opts) - 1:
+                    break
+            if len(fill) < len(opts) - 1:
+                stats["no_filler"] = stats.get("no_filler", 0) + 1
+                continue
+            it = iter(fill)
+            implausible = [opts[j] if j == ci else next(it) for j in range(len(opts))]
+            clean_u = f"{MCQ_INSTRUCTION}\n\nQuestion: {q}\nOptions:\n{render_options(implausible)}"
+            corrupt_u = f"{MCQ_INSTRUCTION}\n\nQuestion: {q}\nOptions:\n{render_options(opts)}"
+            h_idx = None
+            gold = letters[ci]
+            meta = {}
+        fp = finalize_pair(engine, clean_u, corrupt_u, "Answer:", cand_strings, cand_labels, h_idx, "all")
+        if "reject" in fp:
+            stats[fp["reject"]] = stats.get(fp["reject"], 0) + 1
             continue
-
-        head_cache, mlp_cache = engine.cache_clean_activations(clean_ids)
-        handles = []
-
-        for comp_type, layer_idx, head_idx in circuit:
-            if comp_type == "mlp":
-                act = mlp_cache[layer_idx]
-
-                def get_mlp_hook(a):
-                    def hook(m, inp, outp):
-                        clean = a.to(outp.device)
-                        if clean.shape[1] != outp.shape[1]:
-                            curr = outp.clone()
-                            curr[:, -1, :] = clean[:, -1, :]
-                            return curr
-                        return clean
-
-                    return hook
-
-                handles.append(
-                    engine.layers[layer_idx].mlp.register_forward_hook(
-                        get_mlp_hook(act)
-                    )
-                )
-
-            elif comp_type == "head":
-                act = head_cache[layer_idx]
-
-                def get_head_hook(a, target_h):
-                    def hook(m, inp, outp):
-                        curr = (
-                            outp[0].clone() if isinstance(outp, tuple) else outp.clone()
-                        )
-                        B, S, hidden = curr.shape
-                        clean = a.to(curr.device)
-                        Bc, Sc, clean_hidden = clean.shape
-                        cr = curr.reshape(B, S, engine.num_heads, engine.head_dim)
-                        ca = clean.reshape(Bc, Sc, engine.num_heads, engine.head_dim)
-                        if S != Sc:
-                            cr[:, -1, target_h, :] = ca[:, -1, target_h, :]
-                        else:
-                            cr[:, :, target_h, :] = ca[:, :, target_h, :]
-                        patched = cr.reshape(B, S, hidden)
-                        return (
-                            (patched,) + outp[1:]
-                            if isinstance(outp, tuple)
-                            else patched
-                        )
-
-                    return hook
-
-                handles.append(
-                    engine.layers[layer_idx].self_attn.register_forward_hook(
-                        get_head_hook(act, head_idx)
-                    )
-                )
-
-        try:
-            with torch.inference_mode():
-                outputs = engine.model(corrupt_ids.to(engine.model.device))
-                logits = outputs.logits[0, -1, :]
-                d_patched = float((logits[t_id] - logits[h_id]).item())
-        finally:
-            for handle in handles:
-                handle.remove()
-
-        raw_restoration = d_patched - d_corrupt
-        normalized_transfer = raw_restoration / denom
-        per_sample_rows.append(
-            {
-                **base,
-                "patched": True,
-                "d_patched": d_patched,
-                "raw_restoration": raw_restoration,
-                "normalized_transfer": normalized_transfer,
-            }
-        )
-        del head_cache, mlp_cache
-
-    return {"per_sample": per_sample_rows}
+        pairs.append({**fp, "task": task, "pair_type": PAIR_TYPE[task], "sample_id": sid,
+                      "answer_kind": "letter", "gold": gold, "gold_corrupt_str": gold, "meta": meta,
+                      "clean_user": clean_u, "corrupt_user": corrupt_u})
+    return pairs
 
 
-def sample_uniform_random_circuit(universe, k, rng, exclude=None):
-    exclude = set(exclude or [])
-    candidates = [component for component in universe if component not in exclude]
-    if len(candidates) < k:
-        candidates = list(universe)
-    return rng.sample(candidates, k)
+def build_retrieval_pairs(engine, task: str, rows: List[Dict], n: int, n_distractors: int,
+                          rng: random.Random, stats: Dict) -> List[Dict]:
+    real = []
+    seen = set()
+    for r in rows:
+        pm = str(r.get("PMID", "")).strip()
+        ti = str(r.get("Title", "")).strip()
+        if (str(r.get("pubmed_data_type", "")).lower() == "real_data"
+                and str(r.get("is_paper_exists", "")).lower() == "yes"
+                and pm.isdigit() and ti and ti.lower() not in ("unknown", "nan") and pm not in seen):
+            seen.add(pm)
+            real.append((pm, ti.strip("[]. ")))
+    rng.shuffle(real)
+    pairs, i = [], 0
+    step = 2 + n_distractors
+    while len(pairs) < n and i + step <= len(real):
+        group = real[i : i + step]
+        i += step
+        (pa, ta), (pb, tb) = group[0], group[1]
+        dis = group[2:]
+        if task == "PMID2Title":
+            q = "What is the title of the PubMed article with PMID {}? Reply with the exact title only."
+            clean_u, corrupt_u = q.format(pa), q.format(pb)
+            prefill = "Title:"
+            cands = [" " + ta, " " + tb] + [" " + t for _, t in dis]
+            kind, gold, gold_x = "title", ta, tb
+        else:
+            q = 'What is the PubMed URL of the article titled "{}"? Reply with the URL only.'
+            clean_u, corrupt_u = q.format(ta), q.format(tb)
+            prefill = "URL: https://pubmed.ncbi.nlm.nih.gov/"
+            cands = [pa, pb] + [p for p, _ in dis]
+            kind, gold, gold_x = "pmid", pa, pb
+        labels = [c.strip()[:60] for c in cands]
+        fp = finalize_pair(engine, clean_u, corrupt_u, prefill, cands, labels, 1, "pair")
+        if "reject" in fp:
+            stats[fp["reject"]] = stats.get(fp["reject"], 0) + 1
+            continue
+        pairs.append({**fp, "task": task, "pair_type": PAIR_TYPE[task], "sample_id": f"{pa}__vs__{pb}",
+                      "answer_kind": kind, "gold": gold, "gold_corrupt_str": gold_x,
+                      "meta": {"clean_ref": pa, "corrupt_ref": pb}, "clean_user": clean_u, "corrupt_user": corrupt_u})
+    return pairs
 
 
-def sample_layer_matched_random_circuit(universe, reference, rng):
-    reference_set = set(reference)
-    selected, selected_set = [], set()
-    by_layer_type = {}
-    by_layer = {}
-    for component in universe:
-        comp_type, layer, _ = component
-        by_layer_type.setdefault((layer, comp_type), []).append(component)
-        by_layer.setdefault(layer, []).append(component)
+def reference_corpus(rows: List[Dict]) -> Dict:
+    """Real (PMID, title) pairs from the Med-HALT retrieval CSV, used to tell a
+    PMID/title that belongs to ANOTHER known paper from one that matches no
+    known paper.  'Not in this corpus' does NOT mean the paper does not exist."""
+    from experiment_runner import _title_tokens
 
-    for ref in reference:
-        comp_type, layer, _ = ref
-        candidates = [
-            c
-            for c in by_layer_type.get((layer, comp_type), [])
-            if c not in reference_set and c not in selected_set
-        ]
-        if not candidates:
-            candidates = [
-                c
-                for c in by_layer.get(layer, [])
-                if c not in reference_set and c not in selected_set
-            ]
-        if not candidates:
-            candidates = [c for c in universe if c not in selected_set]
-        choice = rng.choice(candidates)
-        selected.append(choice)
-        selected_set.add(choice)
-    return selected
-
-
-def empirical_p_values(observed, random_values):
-    arr = np.asarray([v for v in random_values if np.isfinite(v)], dtype=float)
-    if not np.isfinite(observed) or len(arr) == 0:
-        return np.nan, np.nan
-    one_sided = (1 + np.sum(arr >= observed)) / (len(arr) + 1)
-    two_sided = (1 + np.sum(np.abs(arr) >= abs(observed))) / (len(arr) + 1)
-    return float(one_sided), float(two_sided)
-
-
-def save_heatmap(matrix, labels, title, path, fmt=".3f"):
-    matrix = np.asarray(matrix, dtype=float)
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(matrix)
-
-    ax.set_xticks(range(len(labels)))
-    ax.set_yticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=35, ha="right")
-    ax.set_yticklabels(labels)
-    ax.set_xlabel("Target Task")
-    ax.set_ylabel("Source Task")
-    ax.set_title(title)
-
-    for i in range(matrix.shape[0]):
-        for j in range(matrix.shape[1]):
-            value = matrix[i, j]
-            text = "NA" if np.isnan(value) else format(value, fmt)
-            ax.text(j, i, text, ha="center", va="center")
-
-    fig.colorbar(im, ax=ax)
-    fig.tight_layout()
-    fig.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_cka_layer_matrix_plot(
-    cka_matrix: np.ndarray, task_a: str, task_b: str, output_path: str
-):
-    fig, ax = plt.subplots(figsize=(9, 8))
-    im = ax.imshow(cka_matrix, origin="lower", cmap="magma", vmin=0.0, vmax=1.0)
-    ax.set_xlabel(f"Layers ({task_b})")
-    ax.set_ylabel(f"Layers ({task_a})")
-    ax.set_title(f"Layer-to-Layer Linear CKA Alignment: {task_a} vs {task_b}")
-    fig.colorbar(im, ax=ax, label="Linear CKA Similarity")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_head_aie_heatmap(head_aie, task_name, output_path):
-    fig, ax = plt.subplots(figsize=(12, 8))
-    im = ax.imshow(head_aie, aspect="auto")
-    ax.set_xlabel("Attention Head")
-    ax.set_ylabel("Layer")
-    ax.set_title(f"{task_name}: Attention Head AIE")
-    fig.colorbar(im, ax=ax, label="Average Indirect Effect")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_mlp_aie_plot(mlp_aie, task_name, output_path):
-    layers = np.arange(len(mlp_aie))
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(layers, mlp_aie)
-    ax.axhline(0, linewidth=1)
-    ax.set_xlabel("Layer")
-    ax.set_ylabel("AIE")
-    ax.set_title(f"{task_name}: MLP AIE by Layer")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_top_circuit_plot(labels, scores, task_name, output_path):
-    order = np.arange(len(labels))
-    fig, ax = plt.subplots(figsize=(9, 6))
-    ax.barh(order, scores)
-    ax.set_yticks(order)
-    ax.set_yticklabels(labels)
-    ax.axvline(0, linewidth=1)
-    ax.set_xlabel("Signed Average Indirect Effect")
-    ax.set_title(f"{task_name}: Top Circuit Components")
-    ax.invert_yaxis()
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_denominator_histogram(values, task_name, output_path):
-    values = np.asarray(values, dtype=float)
-    values = values[np.isfinite(values)]
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.hist(np.abs(values), bins=30)
-    ax.set_xlabel("|d_clean - d_corrupt|")
-    ax.set_ylabel("Count")
-    ax.set_title(f"{task_name}: Clean-Corrupt Denominator Magnitudes")
-    ax.set_xscale("log")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_k_sensitivity_plot(df, output_path):
-    subset = df[df["source_task"] != df["target_task"]].copy()
-    if subset.empty:
-        return
-    grouped = (
-        subset.groupby("k", as_index=False)["mean_transfer"].mean().sort_values("k")
-    )
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(grouped["k"], grouped["mean_transfer"], marker="o")
-    ax.set_xlabel("Circuit size k")
-    ax.set_ylabel("Mean off-diagonal causal transfer")
-    ax.set_title("Causal Transfer vs Circuit Size")
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_threshold_sensitivity_plot(df, primary_k, output_path):
-    subset = df[
-        (df["k"] == primary_k) & (df["source_task"] != df["target_task"])
-    ].copy()
-    if subset.empty:
-        return
-    grouped = (
-        subset.groupby("denom_threshold", as_index=False)["mean_transfer"]
-        .mean()
-        .sort_values("denom_threshold")
-    )
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(grouped["denom_threshold"], grouped["mean_transfer"], marker="o")
-    ax.set_xscale("log")
-    ax.set_xlabel("Minimum |clean-corrupt denominator|")
-    ax.set_ylabel("Mean off-diagonal causal transfer")
-    ax.set_title(f"Denominator-Threshold Sensitivity (k={primary_k})")
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_random_control_plot(df, control_type, output_path):
-    subset = df[df["control_type"] == control_type].copy()
-    if subset.empty:
-        return
-    subset["pair"] = subset["source_task"] + "→" + subset["target_task"]
-    x = np.arange(len(subset))
-    fig, ax = plt.subplots(figsize=(max(10, 0.75 * len(subset)), 6))
-    ax.errorbar(
-        x,
-        subset["random_mean"],
-        yerr=subset["random_std"].fillna(0.0),
-        fmt="o",
-        capsize=3,
-        label="Random control mean ± SD",
-    )
-    ax.scatter(x, subset["observed_mean"], marker="x", s=70, label="Discovered circuit")
-    ax.set_xticks(x)
-    ax.set_xticklabels(subset["pair"], rotation=45, ha="right")
-    ax.set_ylabel("Mean causal transfer")
-    ax.set_title(f"Observed vs {control_type.replace('_', ' ').title()} Controls")
-    ax.legend()
-    ax.grid(axis="y", alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
+    p2t = {}
+    for r in rows:
+        pm = str(r.get("PMID", "")).strip()
+        ti = str(r.get("Title", "")).strip()
+        if (str(r.get("pubmed_data_type", "")).lower() == "real_data" and pm.isdigit()
+                and ti and ti.lower() not in ("unknown", "nan")):
+            p2t[pm] = ti.strip("[]. ")
+    return {"pmid2title": p2t, "title_tokens": [(pm, _title_tokens(t)) for pm, t in p2t.items()]}
 
 
 # =====================================================================
-# 4. Main Experiment Orchestrator
+# Validation and splits
 # =====================================================================
 
 
-def upload_results_to_huggingface(output_dir, repo_id, path_in_repo, private=False):
-    from huggingface_hub import HfApi, create_repo
+def validate(pair: Dict, b: Dict, min_denom: float, min_margin: float) -> Dict:
+    h = b["halluc_idx"]
+    denom = b["d_clean"] - b["d_corrupt"]
+    info = {"task": pair["task"], "sample_id": pair["sample_id"], "pair_type": pair["pair_type"],
+            "d_clean": b["d_clean"], "d_corrupt": b["d_corrupt"], "denom": denom,
+            "denom_sign": int(np.sign(denom)), "correct_clean": b["correct_clean"],
+            "correct_corrupt": b["correct_corrupt"],
+            # only hallucination-type pairs can hallucinate; counterfactual corrupt runs are graded against paper B
+            "hallucinated": pair["pair_type"] == "hallucination" and not b["correct_corrupt"],
+            "corrupt_pred_is_halluc": b["corrupt_pred_is_halluc"], "n_cand": len(pair["cand_ids"]),
+            "halluc_label": pair["cand_labels"][h]}
+    reason = "ok"
+    if not b["correct_clean"]:
+        reason = "clean_run_wrong"
+    elif b["d_clean"] < min_margin:
+        reason = "clean_margin_too_small"
+    elif pair["pair_type"] == "counterfactual" and not (
+        b["corrupt_pred_is_halluc"] and b["d_corrupt"] <= -min_margin
+    ):
+        reason = "corrupt_run_wrong_for_its_own_answer"
+    elif denom < min_denom:
+        reason = "denominator_negative" if denom < 0 else "denominator_too_small"
+    info["valid"] = reason == "ok"
+    info["reason"] = reason
+    return info
 
-    create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True, private=private)
-    HfApi().upload_folder(
-        folder_path=output_dir,
-        repo_id=repo_id,
-        repo_type="dataset",
-        path_in_repo=path_in_repo,
-        commit_message=f"Upload MedHALT causal transfer results: {path_in_repo}",
-    )
-    print(
-        f"[HF] Uploaded to https://huggingface.co/datasets/{repo_id}/tree/main/{path_in_repo}"
-    )
+
+def stratified_split(items: List[int], strata: List[bool], fracs, rng: np.random.Generator):
+    out = {"discovery": [], "validation": [], "test": []}
+    for s in (True, False):
+        idx = [i for i, z in zip(items, strata) if z == s]
+        rng.shuffle(idx)
+        n = len(idx)
+        n_d = int(round(fracs[0] * n))
+        n_v = int(round(fracs[1] * n))
+        out["discovery"] += idx[:n_d]
+        out["validation"] += idx[n_d : n_d + n_v]
+        out["test"] += idx[n_d + n_v :]
+    for k in out:
+        out[k] = sorted(out[k])
+    return out
+
+
+# =====================================================================
+# Checkpoint helpers
+# =====================================================================
+
+
+def ckpt(path: str, resume: bool, fn):
+    if resume and os.path.exists(path):
+        log(f"[resume] loading {os.path.basename(path)}")
+        return torch.load(path, weights_only=False)
+    obj = fn()
+    tmp = path + ".tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+    return obj
+
+
+def ckpt_df(path: str, resume: bool, fn):
+    if resume and os.path.exists(path):
+        log(f"[resume] loading {os.path.basename(path)}")
+        return pd.read_csv(path)
+    obj = fn()
+    obj.to_csv(path, index=False)
+    return obj
+
+
+# =====================================================================
+# Seed aggregation
+# =====================================================================
+
+
+def read_csv_safe(path: str) -> pd.DataFrame:
+    """Empty DataFrames are written as empty files (e.g. no gate controls when
+    every protocol abstains); treat those as empty instead of crashing."""
+    try:
+        return pd.read_csv(path) if os.path.exists(path) and os.path.getsize(path) > 0 else pd.DataFrame()
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
+def aggregate(dirs: List[str], out: str):
+    os.makedirs(out, exist_ok=True)
+    for rel, keys, metrics in [
+        ("hallucination_before_after.csv", ["family", "eval_set", "subset", "protocol", "target_task", "method", "event", "scope"],
+         ["rate_before", "rate_after", "delta", "fixed", "newly_bad", "steer_rate"]),
+        ("hallucination_before_after_generation.csv", ["eval_set", "subset", "protocol", "target_task", "method", "event", "scope"],
+         ["rate_before", "rate_after", "delta", "steer_rate"]),
+        ("safe_layer/safe_layer_selection.csv", ["protocol", "target"], ["selected", "layer", "alpha", "val_worst_S", "tau"]),
+        ("safe_layer/risk_gate_controls.csv", ["protocol", "target_task", "eval_set"],
+         ["detector_auroc_vocab", "detector_auroc_candidate", "gate_rate", "S_always", "S_gated", "S_gated_candidate",
+          "S_oracle", "S_random_gate_mean"]),
+        ("selection_funnel.csv", ["task"], ["pool_valid_fraction", "used_valid_pairs", "acc_clean_unfiltered",
+                                           "acc_corrupt_unfiltered", "acc_clean_conditioned_test"]),
+    ]:
+        fr = []
+        for d in dirs:
+            f = os.path.join(d, rel)
+            x = read_csv_safe(f)
+            if not x.empty:
+                meta = json.load(open(os.path.join(d, "run_config.json"))) if os.path.exists(os.path.join(d, "run_config.json")) else {}
+                x["seed"], x["model"] = meta.get("seed"), meta.get("model_name")
+                fr.append(x)
+        if not fr:
+            continue
+        allx = pd.concat(fr, ignore_index=True)
+        k2 = ["model"] + [k for k in keys if k in allx.columns]
+        m2 = [m for m in metrics if m in allx.columns]
+        allx[m2] = allx[m2].apply(pd.to_numeric, errors="coerce")
+        agg = allx.groupby(k2)[m2].agg(["mean", "std", "count"])
+        agg.columns = ["_".join(c) for c in agg.columns]
+        name = os.path.basename(rel).replace(".csv", "")
+        agg.reset_index().to_csv(os.path.join(out, f"{name}_over_seeds.csv"), index=False)
+        log(f"[aggregate] {name}: {len(fr)} runs")
+    frames = []
+    for d in dirs:
+        f = os.path.join(d, "summary.csv")
+        cfg = os.path.join(d, "run_config.json")
+        if not os.path.exists(f):
+            log(f"[aggregate] missing {f}")
+            continue
+        df = read_csv_safe(f)
+        if df.empty:
+            continue
+        meta = json.load(open(cfg)) if os.path.exists(cfg) else {}
+        df["seed"] = meta.get("seed")
+        df["model"] = meta.get("model_name")
+        frames.append(df)
+    if not frames:
+        log("[aggregate] no component summary.csv found (safe-layer-only runs?)")
+        return
+    allf = pd.concat(frames, ignore_index=True)
+    keys = ["model", "source_task", "target_task", "regime", "method", "k"]
+    metrics = [c for c in ["mean_norm_gain", "rescue_rate", "induction_rate_corrupt", "induction_rate_clean",
+                           "acc_corrupt_after", "acc_clean_after"] if c in allf.columns]
+    agg = allf.groupby(keys)[metrics].agg(["mean", "std", "count"])
+    agg.columns = ["_".join(c) for c in agg.columns]
+    os.makedirs(out, exist_ok=True)
+    agg.reset_index().to_csv(os.path.join(out, "aggregate_over_seeds.csv"), index=False)
+    allf.to_csv(os.path.join(out, "all_seeds_summary.csv"), index=False)
+    log(f"[aggregate] wrote {out}/aggregate_over_seeds.csv from {len(frames)} runs")
+
+
+# =====================================================================
+# Main
+# =====================================================================
+
+
+STATE_VERSION = "4"
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Med-HALT paper-grade causal transfer runner"
-    )
-    parser.add_argument(
-        "--model_name", type=str, default="mistralai/Mistral-7B-Instruct-v0.3"
-    )
-    parser.add_argument("--is_qwen", action="store_true")
-    parser.add_argument("--n_samples", type=int, default=100)
-    parser.add_argument(
-        "--top_k", type=int, default=20, help="Primary/headline circuit size"
-    )
-    parser.add_argument(
-        "--k_values", nargs="+", type=int, default=[5, 10, 15, 20, 30, 50]
-    )
-    parser.add_argument(
-        "--head_batch_size",
-        type=int,
-        default=32,
-        help="Chunk size for batched head sweep",
-    )
-    parser.add_argument(
-        "--denom_thresholds",
-        nargs="+",
-        type=float,
-        default=[1e-4, 1e-3, 1e-2, 1e-1],
-        help="Sensitivity thresholds; all must be >= --min_denom",
-    )
-    parser.add_argument("--min_denom", type=float, default=1e-4)
-    parser.add_argument("--bootstrap_samples", type=int, default=5000)
-    parser.add_argument("--bootstrap_confidence", type=float, default=0.95)
-    parser.add_argument("--num_random_controls", type=int, default=20)
-    parser.add_argument(
-        "--control_samples",
-        type=int,
-        default=50,
-        help="Sample subset size for random controls",
-    )
-    parser.add_argument(
-        "--cka_samples",
-        type=int,
-        default=50,
-        help="Sample count per task for CKA analysis",
-    )
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output_dir", type=str, default="./causal_results")
-    parser.add_argument("--hf_repo_id", type=str, default="damonsalvatore123/medhalt")
-    parser.add_argument("--hf_path_in_repo", type=str, default="")
-    parser.add_argument("--hf_private", action="store_true")
-    parser.add_argument("--skip_hf_upload", action="store_true")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="Med-HALT causal transfer + safe-layer hallucination mitigation")
+    ap.add_argument("--model_name", default="mistralai/Mistral-7B-Instruct-v0.3")
+    ap.add_argument("--is_qwen", action="store_true", help="kept for compatibility; templates handle Qwen3")
+    ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    ap.add_argument("--trust_remote_code", action="store_true")
+    ap.add_argument("--data_source", default="hf", choices=["hf", "medhalt"])
+    ap.add_argument("--data_dir", default=None, help="local folder with the Med-HALT CSVs")
+    ap.add_argument("--tasks", nargs="+", default=list(TASKS))
+    ap.add_argument("--n_samples", type=int, default=300, help="candidate pairs built per task before validation")
+    ap.add_argument("--max_pairs_per_task", type=int, default=200, help="cap on valid pairs used")
+    ap.add_argument("--n_distractors", type=int, default=6, help="extra candidates for retrieval tasks")
+    ap.add_argument("--split_fracs", nargs=3, type=float, default=[0.5, 0.25, 0.25])
+    ap.add_argument("--min_split_size", type=int, default=8)
+    ap.add_argument("--min_denom", type=float, default=1.0, help="min d_clean - d_corrupt in logits")
+    ap.add_argument("--min_margin", type=float, default=0.5, help="min correct-run logit margin")
+    ap.add_argument("--unfiltered_frac", type=float, default=0.2,
+                    help="share of ALL built pairs held out before validate(); mitigation is also evaluated on it")
+    ap.add_argument("--router_features", default="vocab", choices=["vocab", "candidate"],
+                    help="risk-gate features: 'vocab' needs no candidate answers (deployable); 'candidate' adds "
+                         "candidate-set logits (comparison only; always reported as safe_layer_gated_candidate)")
+    # ---- safe-layer steering
+    ap.add_argument("--layer_alphas", nargs="+", type=float, default=[0.5, 1.0, 2.0, 4.0, 8.0],
+                    help="multiples of the mean (clean - corrupt) residual difference")
+    ap.add_argument("--safety_lambda", type=float, default=2.0, help="harm aversion in S = benefit - lambda*harm")
+    ap.add_argument("--harm_eps", type=float, default=0.10,
+                    help="max one-sided 95%% upper bound of the induction rate (correct -> wrong) for a layer to count as safe")
+    ap.add_argument("--layer_criterion", default="worst", choices=["worst", "mean"],
+                    help="cross-task aggregation of S when selecting a layer")
+    ap.add_argument("--random_gate_reps", type=int, default=2000)
+    ap.add_argument("--skip_components", action="store_true", help="only run the safe-layer analysis")
+    # ---- component-level analysis
+    ap.add_argument("--top_k", type=int, default=20, help="primary k")
+    ap.add_argument("--k_values", nargs="+", type=int, default=[5, 10, 15, 20, 30, 50])
+    ap.add_argument("--lambdas", nargs="+", type=float, default=[0.0, 0.5, 1.0, 2.0, 4.0, 8.0])
+    ap.add_argument("--alphas", nargs="+", type=float, default=[0.5, 1.0, 2.0, 4.0])
+    ap.add_argument("--num_random_controls", type=int, default=20)
+    ap.add_argument("--layer_top_m", type=int, default=4, help="heads per layer for per-layer transfer")
+    ap.add_argument("--batch_size", type=int, default=64)
+    ap.add_argument("--bootstrap_samples", type=int, default=2000)
+    ap.add_argument("--permutations", type=int, default=10000)
+    ap.add_argument("--gen_eval", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--gen_max_samples", type=int, default=40)
+    ap.add_argument("--gen_max_new_tokens", type=int, default=24)
+    ap.add_argument("--gen_splits", nargs="+", default=["unfiltered"], choices=["unfiltered", "test"],
+                    help="evaluation sets for free generation")
+    ap.add_argument("--audit_per_cell", type=int, default=5, help="audit-sheet rows per (task, method, auto label)")
+    ap.add_argument("--audit_labels", default=None, help="filled-in generation_audit_sheet.csv -> agreement report")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--output_dir", default="./causal_results")
+    ap.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--hf_repo_id", default=None)
+    ap.add_argument("--hf_path_in_repo", default="")
+    ap.add_argument("--hf_private", action="store_true")
+    ap.add_argument("--aggregate_dirs", nargs="+", default=None, help="only aggregate finished runs")
+    args = ap.parse_args()
+
+    if args.aggregate_dirs:
+        aggregate(args.aggregate_dirs, args.output_dir)
+        return
 
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    clean_model_id = args.model_name.replace("/", "_")
-    plots_dir = os.path.join(args.output_dir, "plots", clean_model_id)
-    arrays_dir = os.path.join(args.output_dir, "aie_arrays", clean_model_id)
-    cka_dir = os.path.join(args.output_dir, "cka_analysis", clean_model_id)
-    os.makedirs(plots_dir, exist_ok=True)
-    os.makedirs(arrays_dir, exist_ok=True)
-    os.makedirs(cka_dir, exist_ok=True)
+    out = args.output_dir
+    st = os.path.join(out, "state")
+    plots = os.path.join(out, "plots")
+    for d in (out, st, plots):
+        os.makedirs(d, exist_ok=True)
+    vfile = os.path.join(st, "STATE_VERSION")
+    if args.resume and os.path.exists(vfile) and open(vfile).read().strip() != STATE_VERSION:
+        raise SystemExit(f"{st} was written by an older version of this code; use a new --output_dir or --no-resume")
+    open(vfile, "w").write(STATE_VERSION)
+    # settings that change checkpointed computations; resuming with different ones would mix results
+    sig_keys = ["model_name", "dtype", "data_source", "tasks", "n_samples", "max_pairs_per_task", "n_distractors",
+                "split_fracs", "min_denom", "min_margin", "unfiltered_frac", "router_features", "seed", "layer_alphas", "k_values", "top_k", "lambdas",
+                "alphas", "num_random_controls", "layer_top_m"]
+    sig = {k: getattr(args, k) for k in sig_keys}
+    sfile = os.path.join(st, "checkpoint_settings.json")
+    if args.resume and os.path.exists(sfile):
+        old = json.load(open(sfile))
+        diff = {k: (old.get(k), sig[k]) for k in sig_keys if old.get(k) != sig[k]}
+        if diff:
+            raise SystemExit(f"--resume with settings that differ from the checkpoints: {diff}. "
+                             "Use a new --output_dir or --no-resume.")
+    json.dump(sig, open(sfile, "w"), indent=2)
+    with open(os.path.join(out, "run_config.json"), "w") as f:
+        json.dump(vars(args), f, indent=2)
 
-    thresholds = sorted(set([args.min_denom] + list(args.denom_thresholds)))
-    tasks = {
-        "FCT": "FCT",
-        "NOTA": "Nota",
-        "PMID2Title": "pmid2title",
-        "Title2URL": "title2pub",
-    }
+    engine = CausalEngine(args.model_name, dtype=args.dtype, trust_remote_code=args.trust_remote_code)
+    space = engine.space
+    k_values = sorted({k for k in args.k_values + [args.top_k] if 0 < k <= space.size})
+    primary_k = args.top_k if args.top_k in k_values else k_values[-1]
 
-    model_name_lower = args.model_name.lower()
-    if args.is_qwen or "qwen" in model_name_lower:
-        model_type = "qwen"
-    elif "med42" in model_name_lower:
-        model_type = "med42"
-    elif "gemma" in model_name_lower:
-        model_type = "gemma"
-    elif "phi" in model_name_lower:
-        model_type = "phi"
+    # ------------------------------------------------------------------ pairs
+    pairs: Dict[str, List[Dict]] = {}
+    refs: Dict[str, Optional[Dict]] = {}
+    build_rows = []
+    for ti, task in enumerate(args.tasks):
+        def _build(task=task, ti=ti):
+            rng = random.Random(args.seed + 1000 * ti)
+            stats: Dict = {}
+            rows = load_raw(TASKS[task], args.data_source, args.data_dir)
+            if PAIR_TYPE[task] == "hallucination":
+                ps = build_mcq_pairs(engine, task, rows, args.n_samples, rng, stats)
+            else:
+                ps = build_retrieval_pairs(engine, task, rows, args.n_samples, args.n_distractors, rng, stats)
+            ref = reference_corpus(rows) if PAIR_TYPE[task] == "counterfactual" else None
+            return {"pairs": ps, "stats": stats, "n_raw": len(rows), "ref": ref}
+        res = ckpt(os.path.join(st, f"pairs_{task}.pt"), args.resume, _build)
+        pairs[task] = res["pairs"]
+        refs[task] = res.get("ref")
+        build_rows.append({"task": task, "raw_rows": res["n_raw"], "pairs_built": len(res["pairs"]),
+                           **{f"rejected_{k}": v for k, v in res["stats"].items()}})
+        log(f"[pairs] {task}: built {len(res['pairs'])} candidate pairs; rejections {res['stats']}")
+    pd.DataFrame(build_rows).to_csv(os.path.join(out, "pair_construction.csv"), index=False)
+
+    # ---------------------------------------------- verify cached intervention path
+    first = next((ps[0] for ps in pairs.values() if ps), None)
+    if first is not None:
+        ver = engine.verify_cached_equivalence(first["corrupt_ids"], first["clean_ids"], first["cand_ids"])
+        json.dump(ver, open(os.path.join(out, "verify_cached_equivalence.json"), "w"), indent=2)
+
+    # ------------------------------------------------- base pass + validation
+    base: Dict[str, List[Dict]] = {}
+    val_rows, splits, usable, funnel = [], {}, [], []
+    passes: Dict[str, Dict[str, bool]] = {}
+    split_rng = np.random.default_rng(args.seed)
+    for task in args.tasks:
+        b = ckpt(os.path.join(st, f"base_{task}.pt"), args.resume,
+                 lambda task=task: ER.base_pass(engine, pairs[task], f"base[{task}]"))
+        for p, bb in zip(pairs[task], b):
+            p["halluc_idx"] = bb["halluc_idx"]
+            p["gold_corrupt"] = bb["gold_corrupt"]
+        infos = [validate(p, bb, args.min_denom, args.min_margin) for p, bb in zip(pairs[task], b)]
+        # Unfiltered held-out set: a random share of ALL built pairs, removed BEFORE
+        # validate() is applied, so mitigation results on it are not conditioned
+        # on the model answering the clean prompt correctly.
+        order = np.random.default_rng(args.seed + 99).permutation(len(infos))
+        n_unf = int(round(args.unfiltered_frac * len(infos)))
+        unf_idx = sorted(order[:n_unf].tolist())
+        unf_set = set(unf_idx)
+        for i, inf in enumerate(infos):
+            inf["heldout_unfiltered"] = i in unf_set
+        val_rows += infos
+        valid_idx = [i for i, inf in enumerate(infos) if inf["valid"] and i not in unf_set][: args.max_pairs_per_task]
+        strata = [infos[i]["hallucinated"] for i in valid_idx]
+        sp = stratified_split(valid_idx, strata, args.split_fracs, split_rng)
+        sp["unfiltered"] = unf_idx
+        splits[task] = sp
+        passes[task] = {pairs[task][i]["sample_id"]: bool(infos[i]["valid"]) for i in unf_idx}
+        base[task] = b
+        ok = all(len(sp[s]) >= args.min_split_size for s in ("discovery", "validation", "test"))
+        if ok:
+            usable.append(task)
+        pool = [i for i in range(len(infos)) if i not in unf_set]
+
+        def acc(idx, kind):
+            return float(np.mean([b[i][f"correct_{kind}"] for i in idx])) if idx else np.nan
+
+        funnel.append({"task": task, "pair_type": PAIR_TYPE[task], "pairs_built": len(infos),
+                       "unfiltered_heldout": len(unf_idx), "pool": len(pool),
+                       "pool_valid": int(sum(infos[i]["valid"] for i in pool)),
+                       "pool_valid_fraction": float(np.mean([infos[i]["valid"] for i in pool])) if pool else np.nan,
+                       "used_valid_pairs": len(valid_idx), "usable": ok,
+                       "unfiltered_valid_fraction": float(np.mean([infos[i]["valid"] for i in unf_idx])) if unf_idx else np.nan,
+                       "acc_clean_unfiltered": acc(unf_idx, "clean"), "acc_corrupt_unfiltered": acc(unf_idx, "corrupt"),
+                       "acc_clean_conditioned_test": acc(sp["test"], "clean"),
+                       "acc_corrupt_conditioned_test": acc(sp["test"], "corrupt"),
+                       **{f"rejected_{k}": v for k, v in pd.Series([infos[i]["reason"] for i in pool]).value_counts().items()
+                          if k != "ok"}})
+        log(f"[validate] {task}: {len(valid_idx)}/{len(pool)} pool pairs valid "
+            f"(hallucinated {sum(strata)}), split sizes { {k: len(v) for k, v in sp.items()} }"
+            + ("" if ok else "  -> EXCLUDED from the conditioned analysis (still evaluated on the unfiltered set)"))
+    pd.DataFrame(val_rows).to_csv(os.path.join(out, "pair_validation.csv"), index=False)
+    pd.DataFrame(funnel).to_csv(os.path.join(out, "selection_funnel.csv"), index=False)
+    json.dump({t: {k: [pairs[t][i]["sample_id"] for i in v] for k, v in s.items()} for t, s in splits.items()},
+              open(os.path.join(out, "splits.json"), "w"), indent=2)
+    if not usable:
+        raise SystemExit("No task has enough valid pairs; see pair_validation.csv")
+    pair_types = {t: PAIR_TYPE[t] for t in args.tasks}
+    hallu_tasks = [t for t in usable if pair_types[t] == "hallucination"]
+    unf_tasks = [t for t in args.tasks if splits[t]["unfiltered"]]
+
+    def sub(task, split):
+        return [pairs[task][i] for i in splits[task][split]]
+
+    def subbase(task, split):
+        return [base[task][i] for i in splits[task][split]]
+
+    # =================================================================
+    # PART A — safe-layer steering (layer-level mitigation)
+    # =================================================================
+    sl_dir = os.path.join(out, "safe_layer")
+    os.makedirs(sl_dir, exist_ok=True)
+    sl_plots = os.path.join(plots, "safe_layer")
+    layer_sel = pd.DataFrame()
+    sl_routers: Dict = {}
+    sl_vecs: Dict = {}
+    sl_feats: Dict = {}
+    if not hallu_tasks:
+        log("[safe-layer] no usable hallucination task -> skipping layer-level mitigation")
     else:
-        model_type = "default"  # Works identically for Mistral
+        log(f"[safe-layer] hallucination tasks {hallu_tasks}; guard tasks {[t for t in usable if t not in hallu_tasks]}")
+        sl_vecs, alias, vsrc, vstats = SL.build_layer_vectors(
+            {t: subbase(t, "discovery") for t in usable}, pair_types, usable, args.seed, targets=unf_tasks)
+        vstats.to_csv(os.path.join(sl_dir, "layer_vector_stats.csv"), index=False)
+        canonical = sorted({a for a in alias.values() if not a.startswith("RANDOM:")})
+        randoms = sorted({a for a in alias.values() if a.startswith("RANDOM:")})
+        log(f"[safe-layer] vectors {canonical} (+{len(randoms)} random-direction controls); aliases "
+            f"{ {k: v for k, v in alias.items() if k != v} }")
+        layers = list(range(engine.num_layers))
+        runs_list, eff_list = [], []
+        jobs = [(t, s) for t in usable for s in ("validation", "test")] + [(t, "unfiltered") for t in unf_tasks]
+        for t, split in jobs:
+                names = canonical + (randoms if split != "validation" else [])
+                path_r = os.path.join(st, f"sl_runs_{t}_{split}.csv.gz")
+                path_e = os.path.join(st, f"sl_eff_{t}_{split}.parquet" if _has_parquet() else f"sl_eff_{t}_{split}.csv.gz")
+                if args.resume and os.path.exists(path_r) and os.path.exists(path_e):
+                    log(f"[resume] safe-layer sweep {t}/{split}")
+                    r = pd.read_csv(path_r)
+                    e = pd.read_parquet(path_e) if path_e.endswith(".parquet") else pd.read_csv(path_e)
+                    e["alpha"] = e.alpha.astype(np.float32)
+                else:
+                    log(f"[safe-layer] sweep {t}/{split}: {len(splits[t][split])} pairs x {len(names)} vectors x "
+                        f"{len(layers)} layers x {len(args.layer_alphas)} alphas")
+                    r, e = SL.layer_sweep(engine, t, split, sub(t, split), sl_vecs, names, layers, args.layer_alphas,
+                                          args.batch_size, passes=passes[t] if split == "unfiltered" else None)
+                    r.to_csv(path_r, index=False)
+                    (e.to_parquet(path_e, index=False) if path_e.endswith(".parquet") else e.to_csv(path_e, index=False))
+                runs_list.append(r)
+                eff_list.append(e)
+        runs = pd.concat(runs_list, ignore_index=True)
+        effects = pd.concat(eff_list, ignore_index=True)
+        effects["vec"] = effects.vec.astype(str)
+        # expand aliases so every vector name (e.g. LOTO:FCT == NOTA) has rows
+        extra = []
+        for name, canon in alias.items():
+            if name != canon:
+                e2 = effects[effects.vec == canon].copy()
+                e2["vec"] = name
+                extra.append(e2)
+        if extra:
+            effects = pd.concat([effects] + extra, ignore_index=True)
 
-    print(f"[INIT] Model family resolved to: '{model_type}'")
+        tab = SL.safety_table(runs, effects, args.safety_lambda)
+        tab.to_csv(os.path.join(sl_dir, "layer_safety_table.csv.gz"), index=False)
 
-    engine = CausalEngine(args.model_name, is_qwen=(model_type == "qwen"))
-    pair_builder = MedHALTPairBuilder(
-        engine.tokenizer, model_type=model_type, seed=args.seed
-    )
-    total_components = engine.num_layers * engine.num_heads + engine.num_layers
-    k_values = sorted(
-        {k for k in list(args.k_values) + [args.top_k] if 0 < k <= total_components}
-    )
-
-    print("\n--- Generating Med-HALT Contrastive Evaluation Sets ---", now())
-    datasets = {}
-    for task_index, (task_key, dataset_name) in enumerate(tasks.items()):
-        datasets[task_key] = pair_builder.prepare_dataset(
-            dataset_name,
-            n_samples=args.n_samples,
-            task_seed=args.seed + 1000 * task_index,
-        )
-
-    # ------------------------------------------------------------------
-    # Phase 1: Vectorized Full Ranking per Task
-    # ------------------------------------------------------------------
-    print("\n--- Phase 1: Vectorized Circuit Discovery ---", now())
-    discovery_results = {}
-    discovery_summary_rows = []
-    discovery_sample_rows = []
-    ranking_rows = []
-    discovery_threshold_rows = []
-
-    for task_key in tasks:
-        print(f"\n[MAIN] Discovering ranking for {task_key}...", now())
-        result = discover_circuit(
-            engine,
-            datasets[task_key],
-            min_denom=args.min_denom,
-            head_batch_size=args.head_batch_size,
-        )
-        discovery_results[task_key] = result
-
-        discovery_summary_rows.append(
-            {
-                "task": task_key,
-                "total_samples": result["total_count"],
-                "valid_samples": result["valid_count"],
-                "valid_fraction": result["valid_fraction"],
-                "mean_abs_head_aie": result["mean_abs_head_aie"],
-                "max_abs_head_aie": result["max_abs_head_aie"],
-                "mean_abs_mlp_aie": result["mean_abs_mlp_aie"],
-                "max_abs_mlp_aie": result["max_abs_mlp_aie"],
-                "mean_clean_corrupt_gap": result["mean_clean_corrupt_gap"],
-                "std_clean_corrupt_gap": result["std_clean_corrupt_gap"],
-            }
-        )
-
-        for row in result["sample_rows"]:
-            discovery_sample_rows.append({"task": task_key, **row})
-
-        for row in result["ranking"]:
-            ranking_rows.append(
-                {"task": task_key, **{k: v for k, v in row.items() if k != "component"}}
-            )
-
-        np.save(
-            os.path.join(arrays_dir, f"{task_key}_head_aie.npy"), result["head_aie"]
-        )
-        np.save(os.path.join(arrays_dir, f"{task_key}_mlp_aie.npy"), result["mlp_aie"])
-
-        save_head_aie_heatmap(
-            result["head_aie"],
-            task_key,
-            os.path.join(plots_dir, f"{task_key}_head_aie.png"),
-        )
-        save_mlp_aie_plot(
-            result["mlp_aie"],
-            task_key,
-            os.path.join(plots_dir, f"{task_key}_mlp_aie.png"),
-        )
-        save_denominator_histogram(
-            [r["denominator"] for r in result["sample_rows"]],
-            task_key,
-            os.path.join(plots_dir, f"{task_key}_denominator_histogram.png"),
-        )
-
-        _, primary_labels, primary_scores = circuit_from_ranking(
-            result["ranking"], args.top_k
-        )
-        save_top_circuit_plot(
-            primary_labels,
-            primary_scores,
-            task_key,
-            os.path.join(plots_dir, f"{task_key}_top_{args.top_k}_circuit.png"),
-        )
-
-        base_labels = primary_labels
-        for threshold in thresholds:
-            alt_ranking = ranking_at_threshold(result, threshold)
-            if alt_ranking is None:
+        # cross-task safe-layer ranking per vector (validation = used for selection; test = reported)
+        rk, prof, agr = [], [], []
+        for v in canonical + ["POOLED"]:
+            if v not in alias or (v != alias[v] and v != "POOLED"):
                 continue
-            _, alt_labels, _ = circuit_from_ranking(alt_ranking, args.top_k)
-            sim = circuit_similarity(base_labels, alt_labels)
-            n_valid = int(np.sum(np.abs(result["valid_denominators"]) >= threshold))
-            discovery_threshold_rows.append(
-                {
-                    "task": task_key,
-                    "denom_threshold": threshold,
-                    "valid_samples": n_valid,
-                    "k": args.top_k,
-                    "jaccard_to_base": sim["jaccard"],
-                    "dice_to_base": sim["dice"],
-                    "overlap_to_base": sim["overlap_coefficient"],
-                }
-            )
+            for split, tasks_ in (("validation", usable), ("test", usable), ("unfiltered", unf_tasks)):
+                a, b_, c = SL.cross_task_ranking(tab, v, tasks_, pair_types, args.harm_eps, split)
+                rk.append(a); prof.append(b_); agr.append(c)
+        ranking = pd.concat(rk, ignore_index=True) if rk else pd.DataFrame()
+        ranking = ranking.drop_duplicates(subset=["vec", "split", "layer"]) if not ranking.empty else ranking
+        ranking.to_csv(os.path.join(sl_dir, "cross_task_safe_layer_ranking.csv"), index=False)
+        pd.concat(prof, ignore_index=True).drop_duplicates().to_csv(os.path.join(sl_dir, "safe_layer_profile_per_task.csv"), index=False)
+        pd.concat(agr, ignore_index=True).drop_duplicates().to_csv(os.path.join(sl_dir, "layer_rank_agreement.csv"), index=False)
 
-    pd.DataFrame(discovery_summary_rows).to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_discovery_metrics.csv"),
-        index=False,
-    )
-    pd.DataFrame(discovery_sample_rows).to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_discovery_sample_metrics.csv"),
-        index=False,
-    )
-    pd.DataFrame(ranking_rows).to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_full_component_ranking.csv"),
-        index=False,
-    )
-    pd.DataFrame(discovery_threshold_rows).to_csv(
-        os.path.join(
-            args.output_dir, f"{clean_model_id}_discovery_threshold_sensitivity.csv"
-        ),
-        index=False,
-    )
+        # selection (validation) + risk gate + test outcomes
+        eval_targets = [t for t in args.tasks if t in usable or t in unf_tasks]
+        protocols = SL.build_protocols(usable, eval_targets, pair_types, alias)
+        for t in usable:
+            for split in ("discovery", "validation", "test"):
+                sl_feats.update(SL.run_features(sub(t, split), subbase(t, split), t, split))
+        for t in unf_tasks:
+            sl_feats.update(SL.run_features(sub(t, "unfiltered"), subbase(t, "unfiltered"), t, "unfiltered"))
+        layer_sel, sl_out, sl_ctl, sl_routers = SL.evaluate_protocols(
+            protocols, tab, runs, effects, sl_feats, pair_types, engine.num_layers, args.safety_lambda,
+            args.harm_eps, args.layer_criterion, args.random_gate_reps, args.seed, alias=alias,
+            eval_sets=("test", "unfiltered"), primary_mode=args.router_features)
+        layer_sel.to_csv(os.path.join(sl_dir, "safe_layer_selection.csv"), index=False)
+        sl_out.to_csv(os.path.join(sl_dir, "layer_steering_eval_runs.csv.gz"), index=False)
+        sl_ctl.to_csv(os.path.join(sl_dir, "risk_gate_controls.csv"), index=False)
+        ba = SL.before_after_from_runs(sl_out[sl_out.method != "none"],
+                                       ["protocol", "target_task", "pair_type", "method"],
+                                       args.bootstrap_samples, args.seed)
+        ba.insert(0, "family", "layer_steer")
+        ba.to_csv(os.path.join(sl_dir, "hallucination_before_after_layer.csv"), index=False)
+        SL.make_safe_layer_plots(sl_plots, tab, ranking, layer_sel, sl_out, sl_ctl, args.harm_eps, args.safety_lambda)
 
-    # ------------------------------------------------------------------
-    # Phase 2: Empirical 4x4 Transfer
-    # ------------------------------------------------------------------
-    print("\n--- Phase 2: Empirical Multi-k Transfer ---", now())
-    task_keys = list(tasks.keys())
-    aggregate_rows = []
-    threshold_rows = []
-    per_sample_rows = []
-    primary_stats = {}
+        # console summary
+        print("\n==== Safe-layer selection (validation) ====")
+        cols = [c for c in ["protocol", "vec", "selection_tasks", "selected", "layer", "alpha", "val_worst_S",
+                            "val_max_induction_ucb", "val_min_n_correct", "zero_error_ucb_floor", "val_induced",
+                            "val_rescued", "tau", "val_gate_rate", "abstain_reason"] if c in layer_sel.columns]
+        print(layer_sel.drop_duplicates(subset=["protocol", "vec", "selection_tasks"])[cols].round(3).to_string(index=False))
+        if "eps_achievable" in layer_sel.columns and (~layer_sel.eps_achievable.fillna(True).astype(bool)).any():
+            log(f"[safe-layer] WARNING: for some selection sets even zero induced errors cannot certify "
+                f"induction <= {args.harm_eps} with this many validation runs; raise --max_pairs_per_task / "
+                f"--n_samples or relax --harm_eps (see zero_error_ucb_floor in safe_layer_selection.csv)")
+        for subset, title in (("conditioned", "filtered test split"), ("all", "UNFILTERED held-out set")):
+            show = ba[(ba.event == "answer_error") & (ba.scope == "all") & (ba.subset == subset)
+                      & ba.method.isin(["safe_layer_always", "safe_layer_gated"])]
+            if not show.empty:
+                print(f"\n==== Answer error before -> after ({title}, clean+corrupt runs) ====")
+                print(show[["protocol", "target_task", "method", "rate_before", "rate_after", "delta", "fixed",
+                            "newly_bad", "p_mcnemar", "steer_rate"]].round(3).to_string(index=False))
 
-    for k in k_values:
-        circuits = {}
-        labels_by_task = {}
-        for task_key in task_keys:
-            circuit, labels, _ = circuit_from_ranking(
-                discovery_results[task_key]["ranking"], k
-            )
-            circuits[task_key] = circuit
-            labels_by_task[task_key] = labels
+    # =================================================================
+    # PART B — component-level discovery, harm-aware circuits, causal transfer
+    # =================================================================
+    sources: Dict[str, Dict] = {}
+    df = pd.DataFrame()
+    summary = pd.DataFrame()
+    if not args.skip_components:
+        calib_rows, router_rows, disc_rows = [], [], []
+        for task in usable:
+            steerable = pair_types[task] == "hallucination"
+            log(f"[discovery] {task} (steering {'on' if steerable else 'off: counterfactual task'})")
+            vectors = ckpt(os.path.join(st, f"vectors_{task}.pt"), args.resume,
+                           lambda task=task: ER.compute_steering_vectors(engine, sub(task, "discovery")))
+            disc = ckpt(os.path.join(st, f"discovery_{task}.pt"), args.resume,
+                        lambda task=task, vectors=vectors, steerable=steerable: ER.discovery_sweep(
+                            engine, sub(task, "discovery"), vectors, args.batch_size, with_steer=steerable))
+            corr_ok = np.array([bb["correct_corrupt"] for bb in subbase(task, "discovery")])
+            scores = ER.component_scores(disc, corr_ok)
+            np.save(os.path.join(st, f"aie_{task}.npy"), scores["aie"])
+            rank = np.argsort(-np.abs(scores["aie"]))
+            for r, c in enumerate(rank):
+                disc_rows.append({"task": task, "rank": r + 1, "component": space.label(c), "layer": int(space.layer_of(c)),
+                                  "type": "mlp" if space.is_mlp(c) else "head", "aie": float(scores["aie"][c]),
+                                  "R_patch": float(scores["R_patch"][c]), "H_patch": float(scores["H_patch"][c]),
+                                  "R_steer": float(scores["R_steer"][c]), "H_steer": float(scores["H_steer"][c])})
+            log(f"[discovery] {task} top-10 |AIE|: {space.labels(rank[:10])}")
 
-        for i, source_task in enumerate(task_keys):
-            for j, target_task in enumerate(task_keys):
-                print(f"[MAIN] Transfer k={k}: {source_task} -> {target_task}", now())
-                evaluation = evaluate_circuit_transfer(
-                    engine,
-                    circuits[source_task],
-                    datasets[target_task],
-                    min_denom=args.min_denom,
-                )
-                similarity = circuit_similarity(
-                    labels_by_task[source_task], labels_by_task[target_task]
-                )
+            sel = ckpt(os.path.join(st, f"selection_{task}.pt"), args.resume,
+                       lambda task=task, scores=scores, vectors=vectors, steerable=steerable: ER.calibrate_and_select(
+                           engine, sub(task, "validation"), scores, vectors, k_values, args.lambdas, args.alphas,
+                           args.num_random_controls, args.seed + 7, args.batch_size, steer=steerable))
+            for r in sel["calibration"]:
+                calib_rows.append({"task": task, **r})
+            for k, ent in sel["circuits"].items():
+                for rg in ("patch", "steer"):
+                    if ent.get(rg) is None:
+                        continue
+                    calib_rows.append({"task": task, "k": k, "regime": rg, "method": "chosen",
+                                       "lambda": ent[rg]["harm_aware_lambda"],
+                                       "alpha": ent["steer"]["alpha"]["harm_aware"] if rg == "steer" else np.nan,
+                                       "val_objective": np.nan,
+                                       "harm_aware_components": " ".join(space.labels(ent[rg]["harm_aware"])),
+                                       "topk_aie_components": " ".join(space.labels(ent[rg]["topk_aie"])),
+                                       "layer_matched_exact_fraction": ent["layer_matched_exact_fraction"]})
+            routers = {}
+            if steerable:
+                routers, rrows = ckpt(os.path.join(st, f"router_{task}.pt"), args.resume,
+                                      lambda task=task, sel=sel, vectors=vectors: ER.fit_router(
+                                          engine, subbase(task, "discovery"), sub(task, "validation"),
+                                          subbase(task, "validation"), sel, vectors, args.batch_size,
+                                          mode=args.router_features))
+                router_rows += [{"task": task, **r} for r in rrows]
+            sources[task] = {"sel": sel, "vectors": vectors, "routers": routers, "scores": scores, "steerable": steerable}
+        pd.DataFrame(disc_rows).to_csv(os.path.join(out, "component_ranking.csv"), index=False)
+        pd.DataFrame(calib_rows).to_csv(os.path.join(out, "calibration.csv"), index=False)
+        pd.DataFrame(router_rows).to_csv(os.path.join(out, "router_calibration.csv"), index=False)
 
-                for row in evaluation["per_sample"]:
-                    per_sample_rows.append(
-                        {
-                            "model": args.model_name,
-                            "source_task": source_task,
-                            "target_task": target_task,
-                            "k": k,
-                            **row,
-                        }
-                    )
+        frames, lframes = [], []
+        for t in usable:
+            path_m = os.path.join(st, f"eval_{t}.csv.gz")
+            path_l = os.path.join(st, f"layers_{t}.csv.gz")
+            if args.resume and os.path.exists(path_m) and os.path.exists(path_l):
+                log(f"[resume] eval {t}")
+                dm, dl = pd.read_csv(path_m), pd.read_csv(path_l)
+            else:
+                log(f"[eval] target {t} ({len(splits[t]['test'])} test pairs, {len(sources)} sources)")
+                dm, dl = ER.evaluate_target(engine, t, sub(t, "test"), sources, args.layer_top_m, args.batch_size,
+                                            test_base=subbase(t, "test"))
+                dm.to_csv(path_m, index=False)
+                dl.to_csv(path_l, index=False)
+            frames.append(dm)
+            lframes.append(dl)
+        df = pd.concat(frames, ignore_index=True)
+        dl = pd.concat(lframes, ignore_index=True)
 
-                stats = summarize_transfer_rows(
-                    evaluation["per_sample"],
-                    threshold=args.min_denom,
-                    n_bootstrap=args.bootstrap_samples,
-                    confidence=args.bootstrap_confidence,
-                    seed=args.seed + 100000 * k + 100 * i + j,
-                )
-                aggregate_rows.append(
-                    {
-                        "model": args.model_name,
-                        "source_task": source_task,
-                        "target_task": target_task,
-                        "k": k,
-                        "denom_threshold": args.min_denom,
-                        "mean_transfer": stats["mean"],
-                        "median_transfer": stats["median"],
-                        "std_transfer": stats["std"],
-                        "bootstrap_mean_ci_low": stats["bootstrap_mean_ci_low"],
-                        "bootstrap_mean_ci_high": stats["bootstrap_mean_ci_high"],
-                        "valid_samples": stats["valid_count"],
-                        "valid_fraction": stats["valid_fraction"],
-                        **similarity,
-                    }
-                )
+        summary, tests, ctl = ER.summarize(df, args.bootstrap_samples, args.permutations, args.seed)
+        rr = df[df.method == "harm_routing"]
+        rcal = []
+        for (s, t, k), g in rr.groupby(["source_task", "target_task", "k"]):
+            y = (~g.correct_base.astype(bool)).astype(float).values
+            p = g.risk.values
+            bins = np.clip((p * 10).astype(int), 0, 9)
+            ece = sum(abs(y[bins == b].mean() - p[bins == b].mean()) * (bins == b).mean() for b in np.unique(bins))
+            rcal.append({"source_task": s, "target_task": t, "k": k, "brier": float(np.mean((p - y) ** 2)),
+                         "ece": float(ece), "auroc": SL.auroc(p, y.astype(bool)), "route_rate": float(g.routed.mean())})
+        pd.DataFrame(rcal).to_csv(os.path.join(out, "router_test_calibration.csv"), index=False)
+        summary.to_csv(os.path.join(out, "summary.csv"), index=False)
+        tests.to_csv(os.path.join(out, "paired_tests.csv"), index=False)
+        ctl.to_csv(os.path.join(out, "random_control_tests.csv"), index=False)
+        lsum = ER.summarize_layers(dl, {t: sources[t]["scores"] for t in usable}, space)
+        lsum.to_csv(os.path.join(out, "layer_transfer.csv"), index=False)
 
-                if k == args.top_k:
-                    primary_stats[(source_task, target_task)] = {**stats, **similarity}
+        valid_base = {t: [base[t][i] for s in ("discovery", "validation", "test") for i in splits[t][s]] for t in usable}
+        cka, dirs = ER.representation_analysis(valid_base, engine.num_layers, args.seed)
+        cka.to_csv(os.path.join(out, "paired_cka_clean_vs_corrupt.csv"), index=False)
+        dirs.to_csv(os.path.join(out, "direction_alignment.csv"), index=False)
+        ER.make_plots(plots, summary, lsum, cka, dirs, primary_k, {t: sources[t]["scores"] for t in usable}, space)
 
-                for threshold in thresholds:
-                    tstats = summarize_transfer_rows(
-                        evaluation["per_sample"],
-                        threshold=threshold,
-                        n_bootstrap=args.bootstrap_samples,
-                        confidence=args.bootstrap_confidence,
-                        seed=args.seed + 700000 + 100000 * k + 100 * i + j,
-                    )
-                    threshold_rows.append(
-                        {
-                            "model": args.model_name,
-                            "source_task": source_task,
-                            "target_task": target_task,
-                            "k": k,
-                            "denom_threshold": threshold,
-                            "mean_transfer": tstats["mean"],
-                            "median_transfer": tstats["median"],
-                            "std_transfer": tstats["std"],
-                            "valid_samples": tstats["valid_count"],
-                            "valid_fraction": tstats["valid_fraction"],
-                        }
-                    )
+        # component steering on the unfiltered held-out set (all tasks with one)
+        uframes = []
+        for t in unf_tasks:
+            if not any(S.get("steerable") for S in sources.values()):
+                break
+            pu = os.path.join(st, f"eval_unfiltered_{t}.csv.gz")
+            if args.resume and os.path.exists(pu):
+                du = pd.read_csv(pu)
+            else:
+                du = ER.steering_outcomes(engine, t, sub(t, "unfiltered"), subbase(t, "unfiltered"), sources, args.batch_size)
+                du.to_csv(pu, index=False)
+            if not du.empty:
+                du["eval_set"] = "unfiltered"
+                du["passes_filter"] = du.sample_id.astype(str).map({str(k): v for k, v in passes[t].items()}).fillna(False)
+                uframes.append(du)
+        dtest = df.copy()
+        dtest["eval_set"], dtest["passes_filter"] = "test", True
+        comp_runs = SL.component_runs_from_eval(pd.concat([dtest] + uframes, ignore_index=True))
+        if not comp_runs.empty:
+            bac = SL.before_after_from_runs(comp_runs, ["protocol", "target_task", "pair_type", "method"],
+                                            args.bootstrap_samples, args.seed)
+            bac.insert(0, "family", "component")
+            bac.to_csv(os.path.join(out, "hallucination_before_after_component.csv"), index=False)
 
-    df_aggregate = pd.DataFrame(aggregate_rows)
-    df_threshold = pd.DataFrame(threshold_rows)
-    df_samples = pd.DataFrame(per_sample_rows)
-    df_aggregate.to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_k_sensitivity_metrics.csv"),
-        index=False,
-    )
-    df_threshold.to_csv(
-        os.path.join(
-            args.output_dir, f"{clean_model_id}_denominator_threshold_sensitivity.csv"
-        ),
-        index=False,
-    )
-    df_samples.to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_per_sample_transfer.csv"),
-        index=False,
-    )
+        cols = ["source_task", "target_task", "method", "mean_norm_gain", "rescue_rate", "induction_rate_corrupt"]
+        for rg in ("patch", "steer"):
+            s = summary[(summary.regime == rg) & (summary.k == primary_k)]
+            if not s.empty:
+                print(f"\n==== component {rg} regime, k={primary_k} ====")
+                print(s[cols + (["induction_rate_clean"] if rg == "steer" else [])].round(3).to_string(index=False))
 
-    save_k_sensitivity_plot(df_aggregate, os.path.join(plots_dir, "k_sensitivity.png"))
-    save_threshold_sensitivity_plot(
-        df_threshold,
-        args.top_k,
-        os.path.join(plots_dir, "denominator_threshold_sensitivity.png"),
-    )
+    # =================================================================
+    # PART C — free-generation before/after.  Labels are AUTOMATIC PROXIES for
+    # constrained answers (letter / PMID / title vs reference); validate them
+    # with the human-audit sheet before calling them hallucination rates.
+    # =================================================================
+    if args.gen_eval and (not layer_sel.empty or sources):
+        gframes = []
+        gen_targets = {"test": usable, "unfiltered": unf_tasks}
+        for gsplit in args.gen_splits:
+            for t in gen_targets.get(gsplit, []):
+                configs = []
+                if not layer_sel.empty:
+                    for proto in ([f"source:{t}"] if t in hallu_tasks else []) + ["loto", "pooled"]:
+                        row = layer_sel[(layer_sel.protocol == proto) & (layer_sel.target == t)]
+                        if row.empty or not bool(row.selected.iloc[0]):
+                            continue
+                        r0 = row.iloc[0]
+                        key = f"{r0.vec}|{tuple(r0.selection_tasks.split('+'))}|{args.router_features}"
+                        vec = sl_vecs[r0.vec] if r0.vec in sl_vecs else sl_vecs[alias[r0.vec]]
+                        gate = ER.RiskRouter.from_state(sl_routers[key]) if key in sl_routers else None
+                        pname = "in_task" if proto.startswith("source:") else proto
+                        configs.append({"name": "safe_layer_always", "protocol": f"layer:{pname}", "kind": "layer",
+                                        "layer": int(r0.layer), "alpha": float(r0.alpha), "vec": vec, "gate": None})
+                        if gate is not None:
+                            configs.append({"name": "safe_layer_gated", "protocol": f"layer:{pname}", "kind": "layer",
+                                            "layer": int(r0.layer), "alpha": float(r0.alpha), "vec": vec, "gate": gate})
+                S = sources.get(t)
+                if S is not None and S.get("steerable") and (S["sel"]["circuits"].get(primary_k) or {}).get("steer"):
+                    ent = S["sel"]["circuits"][primary_k]["steer"]
+                    base_cfg = {"protocol": "component:in_task", "kind": "component", "circuit": ent["harm_aware"],
+                                "alpha": ent["alpha"]["harm_aware"], "steer_z": S["vectors"]["z"], "steer_mlp": S["vectors"]["mlp"]}
+                    configs.append({**base_cfg, "name": f"harm_aware@k{primary_k}", "gate": None})
+                    if primary_k in S["routers"]:
+                        configs.append({**base_cfg, "name": f"harm_routing@k{primary_k}",
+                                        "gate": ER.RiskRouter.from_state(S["routers"][primary_k])})
+                if not configs:
+                    continue
+                if not any(k.startswith(f"{t}|{gsplit}|") for k in sl_feats):
+                    sl_feats.update(SL.run_features(sub(t, gsplit), subbase(t, gsplit), t, gsplit))
+                sig = json.dumps([gsplit] + [[c["name"], c["protocol"], c.get("layer"), c.get("alpha"),
+                                              None if c.get("gate") is None else c["gate"].tau,
+                                              None if c.get("circuit") is None else list(map(int, c["circuit"]))] for c in configs]
+                                 + [args.gen_max_samples, args.gen_max_new_tokens], default=float)
+                gp = os.path.join(st, f"gen_{gsplit}_{t}_{hashlib.md5(sig.encode()).hexdigest()[:10]}.csv")
+                gframes.append(ckpt_df(gp, args.resume, lambda t=t, gsplit=gsplit, configs=configs: SL.generation_before_after(
+                    engine, t, gsplit, sub(t, gsplit)[: args.gen_max_samples], sl_feats, configs, args.gen_max_new_tokens,
+                    ref=refs.get(t), passes=passes[t] if gsplit == "unfiltered" else None)))
+        if gframes:
+            gen = pd.concat(gframes, ignore_index=True)
+            gen.to_csv(os.path.join(out, "generation_runs.csv"), index=False)
+            gtab = SL.generation_tables(gen, pair_types, args.bootstrap_samples, args.seed)
+            gtab.to_csv(os.path.join(out, "hallucination_before_after_generation.csv"), index=False)
+            gen.groupby(["eval_set", "target_task", "method", "label"]).size().rename("n").reset_index().to_csv(
+                os.path.join(out, "generation_label_counts.csv"), index=False)
+            show = gtab[(gtab.event == "incorrect_answer") & (gtab.scope == "all") & gtab.subset.isin(["conditioned", "all"])]
+            if not show.empty:
+                print("\n==== Generation: incorrect-answer rate (automatic proxy label) before -> after ====")
+                print(show[["eval_set", "protocol", "target_task", "method", "rate_before", "rate_after", "delta",
+                            "p_mcnemar", "steer_rate"]].round(3).to_string(index=False))
+            sheet = ER.audit_sheet(gen, args.audit_per_cell, args.seed)
+            sheet.to_csv(os.path.join(out, "generation_audit_sheet.csv"), index=False)
+            log(f"[audit] wrote {len(sheet)} rows to generation_audit_sheet.csv: fill human_label "
+                f"(correct / incorrect / abstain / unclear), then rerun with --audit_labels <file>")
+        if args.audit_labels:
+            agr, conf = ER.audit_agreement(pd.read_csv(args.audit_labels, keep_default_na=False))
+            agr.to_csv(os.path.join(out, "audit_agreement.csv"), index=False)
+            conf.to_csv(os.path.join(out, "audit_confusion.csv"), index=False)
+            if not agr.empty:
+                print("\n==== Automatic vs human labels ====")
+                print(agr.round(3).to_string(index=False))
 
-    matrix_names = ["mean_transfer", "median_transfer", "jaccard"]
-    matrices = {
-        name: np.full((len(task_keys), len(task_keys)), np.nan) for name in matrix_names
-    }
+    # ----------------------------------------------- combined before/after table
+    parts = [os.path.join(sl_dir, "hallucination_before_after_layer.csv"),
+             os.path.join(out, "hallucination_before_after_component.csv")]
+    frames = [x for x in (read_csv_safe(p) for p in parts) if not x.empty]
+    if frames:
+        pd.concat(frames, ignore_index=True).to_csv(os.path.join(out, "hallucination_before_after.csv"), index=False)
 
-    for i, source_task in enumerate(task_keys):
-        for j, target_task in enumerate(task_keys):
-            stats = primary_stats[(source_task, target_task)]
-            matrices["mean_transfer"][i, j] = stats["mean"]
-            matrices["median_transfer"][i, j] = stats["median"]
-            matrices["jaccard"][i, j] = stats["jaccard"]
+    if args.hf_repo_id:
+        from huggingface_hub import HfApi, create_repo
 
-    for name, matrix in matrices.items():
-        pd.DataFrame(matrix, index=task_keys, columns=task_keys).to_csv(
-            os.path.join(args.output_dir, f"{clean_model_id}_{name}.csv")
-        )
-        save_heatmap(
-            matrix,
-            task_keys,
-            f"{name.replace('_', ' ').title()} (k={args.top_k})",
-            os.path.join(plots_dir, f"{name}_heatmap.png"),
-        )
+        path_in_repo = args.hf_path_in_repo.strip("/") or f"{args.model_name.replace('/', '_')}/seed{args.seed}"
+        create_repo(args.hf_repo_id, repo_type="dataset", exist_ok=True, private=args.hf_private)
+        HfApi().upload_folder(folder_path=out, repo_id=args.hf_repo_id, repo_type="dataset",
+                              path_in_repo=path_in_repo, ignore_patterns=["state/*", "*.tmp*"],
+                              commit_message=f"Med-HALT causal transfer: {path_in_repo}")
+        log(f"[HF] uploaded to {args.hf_repo_id}/{path_in_repo}")
 
-    # ------------------------------------------------------------------
-    # Phase 3: Random Circuit Controls
-    # ------------------------------------------------------------------
-    control_replicate_rows = []
-    control_summary_rows = []
 
-    if args.num_random_controls > 0:
-        print("\n--- Phase 3: Random Circuit Controls ---", now())
-        for source_idx, source_task in enumerate(task_keys):
-            ranking = discovery_results[source_task]["ranking"]
-            universe = [row["component"] for row in ranking]
-            observed_circuit, _, _ = circuit_from_ranking(ranking, args.top_k)
-
-            for target_idx, target_task in enumerate(task_keys):
-                observed = primary_stats[(source_task, target_task)]["mean"]
-                eval_subset = datasets[target_task][
-                    : min(len(datasets[target_task]), args.control_samples)
-                ]
-
-                for control_type in ["uniform", "layer_matched"]:
-                    random_means = []
-                    for replicate in range(args.num_random_controls):
-                        rng = random.Random(
-                            args.seed
-                            + 1000000 * source_idx
-                            + 10000 * target_idx
-                            + 100 * replicate
-                            + (1 if control_type == "layer_matched" else 0)
-                        )
-                        if control_type == "uniform":
-                            circuit = sample_uniform_random_circuit(
-                                universe, args.top_k, rng, exclude=observed_circuit
-                            )
-                        else:
-                            circuit = sample_layer_matched_random_circuit(
-                                universe, observed_circuit, rng
-                            )
-
-                        evaluation = evaluate_circuit_transfer(
-                            engine,
-                            circuit,
-                            eval_subset,
-                            min_denom=args.min_denom,
-                        )
-                        cstats = summarize_transfer_rows(
-                            evaluation["per_sample"],
-                            threshold=args.min_denom,
-                            n_bootstrap=0,
-                            confidence=args.bootstrap_confidence,
-                            seed=args.seed,
-                        )
-                        random_means.append(cstats["mean"])
-                        control_replicate_rows.append(
-                            {
-                                "source_task": source_task,
-                                "target_task": target_task,
-                                "control_type": control_type,
-                                "replicate": replicate,
-                                "k": args.top_k,
-                                "mean_transfer": cstats["mean"],
-                            }
-                        )
-
-                    finite = np.asarray(
-                        [x for x in random_means if np.isfinite(x)], dtype=float
-                    )
-                    p_one, p_two = empirical_p_values(observed, random_means)
-                    random_mean = float(np.mean(finite)) if len(finite) else np.nan
-                    random_std = (
-                        float(np.std(finite, ddof=1)) if len(finite) > 1 else 0.0
-                    )
-                    control_summary_rows.append(
-                        {
-                            "source_task": source_task,
-                            "target_task": target_task,
-                            "control_type": control_type,
-                            "k": args.top_k,
-                            "observed_mean": observed,
-                            "random_mean": random_mean,
-                            "random_std": random_std,
-                            "empirical_p_one_sided": p_one,
-                            "empirical_p_two_sided_abs": p_two,
-                            "num_controls": int(len(finite)),
-                        }
-                    )
-
-    df_control_reps = pd.DataFrame(control_replicate_rows)
-    df_control_summary = pd.DataFrame(control_summary_rows)
-    df_control_reps.to_csv(
-        os.path.join(
-            args.output_dir, f"{clean_model_id}_random_control_replicates.csv"
-        ),
-        index=False,
-    )
-    df_control_summary.to_csv(
-        os.path.join(args.output_dir, f"{clean_model_id}_random_control_summary.csv"),
-        index=False,
-    )
-
-    # ------------------------------------------------------------------
-    # Phase 4: In-Depth CKA (Centered Kernel Alignment) Analysis
-    # ------------------------------------------------------------------
-    print("\n--- Phase 4: In-Depth CKA Representation Analysis ---", now())
-    task_reps = {}
-    n_cka = args.cka_samples
-
-    for task_key in task_keys:
-        print(
-            f"[CKA] Extracting layer activations for {task_key} ({n_cka} samples)...",
-            now(),
-        )
-        task_reps[task_key] = engine.extract_task_representations(
-            datasets[task_key], max_samples=n_cka
-        )
-
-    # 1. Macro Task-to-Task CKA Matrix (Layer-averaged and Final-layer)
-    num_t = len(task_keys)
-    macro_linear_cka = np.zeros((num_t, num_t))
-    macro_rbf_cka = np.zeros((num_t, num_t))
-    final_layer_linear_cka = np.zeros((num_t, num_t))
-    final_l = engine.num_layers - 1
-
-    for i, s_task in enumerate(task_keys):
-        for j, t_task in enumerate(task_keys):
-            # Compute average CKA across all layers
-            layer_lin_sims = []
-            layer_rbf_sims = []
-            for l in range(engine.num_layers):
-                x_rep = task_reps[s_task][l]
-                y_rep = task_reps[t_task][l]
-                layer_lin_sims.append(CenteredKernelAlignment.linear_cka(x_rep, y_rep))
-                layer_rbf_sims.append(CenteredKernelAlignment.rbf_cka(x_rep, y_rep))
-
-            macro_linear_cka[i, j] = float(np.mean(layer_lin_sims))
-            macro_rbf_cka[i, j] = float(np.mean(layer_rbf_sims))
-            final_layer_linear_cka[i, j] = CenteredKernelAlignment.linear_cka(
-                task_reps[s_task][final_l], task_reps[t_task][final_l]
-            )
-
-    df_macro_lin_cka = pd.DataFrame(
-        macro_linear_cka, index=task_keys, columns=task_keys
-    ).round(4)
-    df_macro_rbf_cka = pd.DataFrame(
-        macro_rbf_cka, index=task_keys, columns=task_keys
-    ).round(4)
-    df_final_lin_cka = pd.DataFrame(
-        final_layer_linear_cka, index=task_keys, columns=task_keys
-    ).round(4)
-
-    df_macro_lin_cka.to_csv(
-        os.path.join(cka_dir, f"{clean_model_id}_mean_linear_cka.csv")
-    )
-    df_macro_rbf_cka.to_csv(os.path.join(cka_dir, f"{clean_model_id}_mean_rbf_cka.csv"))
-    df_final_lin_cka.to_csv(
-        os.path.join(cka_dir, f"{clean_model_id}_final_layer_linear_cka.csv")
-    )
-
-    save_heatmap(
-        macro_linear_cka,
-        task_keys,
-        "Macro Mean Linear CKA",
-        os.path.join(plots_dir, "macro_mean_linear_cka_heatmap.png"),
-    )
-    save_heatmap(
-        final_layer_linear_cka,
-        task_keys,
-        f"Final Layer (L{final_l}) Linear CKA",
-        os.path.join(plots_dir, "final_layer_linear_cka_heatmap.png"),
-    )
-
-    # 2. Granular Layer-by-Layer CKA Matrices (Cross-Task Layer Dynamics)
-    cka_layer_profile_rows = []
-    print("[CKA] Computing fine-grained layer-by-layer CKA dynamics...", now())
-
-    for i, s_task in enumerate(task_keys):
-        for j, t_task in enumerate(task_keys):
-            if i > j:
-                continue  # Symmetric cross-task inspection
-
-            full_layer_matrix = np.zeros(
-                (engine.num_layers, engine.num_layers), dtype=np.float32
-            )
-            for l_s in range(engine.num_layers):
-                for l_t in range(engine.num_layers):
-                    rep_s = task_reps[s_task][l_s]
-                    rep_t = task_reps[t_task][l_t]
-                    sim = CenteredKernelAlignment.linear_cka(rep_s, rep_t)
-                    full_layer_matrix[l_s, l_t] = sim
-                    if l_s == l_t:
-                        cka_layer_profile_rows.append(
-                            {
-                                "source_task": s_task,
-                                "target_task": t_task,
-                                "layer": l_s,
-                                "linear_cka": sim,
-                            }
-                        )
-
-            np.save(
-                os.path.join(cka_dir, f"{s_task}_vs_{t_task}_layer_cka.npy"),
-                full_layer_matrix,
-            )
-            save_cka_layer_matrix_plot(
-                full_layer_matrix,
-                s_task,
-                t_task,
-                os.path.join(plots_dir, f"layer_cka_{s_task}_vs_{t_task}.png"),
-            )
-
-    df_layer_profiles = pd.DataFrame(cka_layer_profile_rows)
-    df_layer_profiles.to_csv(
-        os.path.join(cka_dir, f"{clean_model_id}_diagonal_layer_cka.csv"), index=False
-    )
-
-    # 3. Layer CKA Trajectory Plot (Reasoning vs Retrieval Cross-Alignment)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for (s_t, t_t), group in df_layer_profiles.groupby(["source_task", "target_task"]):
-        if s_t != t_t:
-            ax.plot(
-                group["layer"],
-                group["linear_cka"],
-                label=f"{s_t} ↔ {t_t}",
-                marker="o",
-                markersize=3,
-            )
-    ax.set_xlabel("Layer Index")
-    ax.set_ylabel("Linear CKA (Direct Diagonal Alignment)")
-    ax.set_title("Cross-Task Representation Convergence Across Transformer Depth")
-    ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(
-        os.path.join(plots_dir, "cross_task_layer_cka_trajectories.png"),
-        dpi=200,
-        bbox_inches="tight",
-    )
-    plt.close(fig)
-
-    print("\n================ FINAL RESULTS SUMMARY ================")
-    print("\nEmpirical Mean Causal Transfer (Phase 2):")
-    print(
-        pd.DataFrame(
-            matrices["mean_transfer"], index=task_keys, columns=task_keys
-        ).round(4)
-    )
-    print("\nMacro Mean Linear CKA (Phase 4):")
-    print(df_macro_lin_cka)
-
-    if not args.skip_hf_upload:
-        path_in_repo = args.hf_path_in_repo.strip("/") or (
-            f"{clean_model_id}/n{args.n_samples}_k{args.top_k}_seed{args.seed}"
-        )
-        upload_results_to_huggingface(
-            args.output_dir,
-            args.hf_repo_id,
-            path_in_repo,
-            private=args.hf_private,
-        )
+def _has_parquet() -> bool:
+    try:
+        import pyarrow  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 if __name__ == "__main__":

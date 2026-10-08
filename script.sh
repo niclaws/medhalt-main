@@ -1,180 +1,125 @@
 #!/usr/bin/env bash
+# Med-HALT: safe-layer hallucination mitigation + causal transfer, 4 models x 3 seeds on one GPU.
+# Per run: safe-layer selection, cross-task safe-layer ranking, risk-gated safe-layer steering,
+# hallucination before/after tables, then component-level circuits and transfer.
+# Each run resumes from its last finished stage (state/ in its output dir),
+# so re-launching this script after a crash or preemption continues where it stopped.
 
-PROJECT_DIR="~/projects/medhalt-main"
+set -uo pipefail   # no `set -e`: one failed model must not stop the others
+
+PROJECT_DIR="${PROJECT_DIR:-$HOME/projects/medhalt-main}"   # $HOME expands; "~" inside quotes does not
 SCRIPT="$PROJECT_DIR/run_casual_transfer.py"
+SCRATCH="${SCRATCH_DIR:-/scratch/adityasrikar.c/medhalt}"
+RESULTS="$SCRATCH/results_v4"   # v4 checkpoints are not compatible with earlier versions
+LOGS="$SCRATCH/logs_v4"
+HF_REPO="${HF_REPO:-damonsalvatore123/medhalt}"
+SEEDS=(${SEEDS:-0 1 2})
 
-HF_REPO="damonsalvatore123/medhalt"
+mkdir -p "$RESULTS" "$LOGS"
+cd "$PROJECT_DIR" || { echo "PROJECT_DIR not found: $PROJECT_DIR"; exit 1; }
+[ -f "$SCRIPT" ] || { echo "Missing $SCRIPT"; exit 1; }
 
-mkdir -p /scratch/adityasrikar.c/medhalt/logs
+# ---- preflight: catch stale / mismatched copies before burning GPU hours
+for f in patching_engine.py experiment_runner.py safe_layer_steering.py run_casual_transfer.py; do
+  [ -f "$PROJECT_DIR/$f" ] || { echo "PREFLIGHT FAIL: missing $PROJECT_DIR/$f"; exit 1; }
+done
+HELP="$(python "$SCRIPT" --help 2>&1)" || { echo "PREFLIGHT FAIL: $SCRIPT --help errored:"; echo "$HELP"; exit 1; }
+for flag in --layer_alphas --safety_lambda --harm_eps --layer_criterion --unfiltered_frac --router_features --gen_splits; do
+  grep -q -- "$flag" <<< "$HELP" || { echo "PREFLIGHT FAIL: $SCRIPT does not accept $flag (stale copy of run_casual_transfer.py?)"; exit 1; }
+done
+grep -q "import safe_layer_steering" "$SCRIPT" || { echo "PREFLIGHT FAIL: $SCRIPT does not use safe_layer_steering.py"; exit 1; }
+python -c "import sys; sys.path.insert(0, '$PROJECT_DIR'); import safe_layer_steering, experiment_runner as ER; \
+assert hasattr(ER, 'router_features') and hasattr(ER, 'steering_outcomes'), 'stale experiment_runner.py'" \
+  || { echo "PREFLIGHT FAIL: module versions do not match"; exit 1; }
+echo "[preflight] OK: all four Python files present and consistent"
 
-cleanup_gpu() {
-    echo "Clearing GPU memory..."
-    pkill -9 -f "run_casual_transfer.py" 2>/dev/null || true
-    sleep 3
-}
+# tag | HF model id
+MODELS=(
+  "med42_8b|m42-health/Llama3-Med42-8B"
+  "mistral_7b|mistralai/Mistral-7B-Instruct-v0.3"
+  "qwen3_8b|Qwen/Qwen3-8B"
+  "mediphi_3.8b|microsoft/MediPhi-Instruct"
+)
 
-# ==========================================
-# 1. Llama3-Med42-8B (Clinical Aligned)
-# ==========================================
-#cleanup_gpu
-#echo "=========================================="
-#echo "Starting Llama3-Med42-8B"
-#echo "=========================================="
-#
-#python "$SCRIPT" \
-#    --model_name m42-health/Llama3-Med42-8B \
-#    --n_samples 100 \
-#    --top_k 20 \
-#    --head_batch_size 32 \
-#    --k_values 5 10 15 20 30 50 \
-#    --denom_thresholds 0.0001 0.001 0.01 0.1 \
-#    --bootstrap_samples 2000 \
-#    --num_random_controls 20 \
-#    --control_samples 50 \
-#    --seed 42 \
-#    --output_dir /scratch/adityasrikar.c/medhalt/results/med42_8b_seed42 \
-#    --hf_repo_id "$HF_REPO" \
-#    2>&1 | tee /scratch/adityasrikar.c/medhalt/logs/med42_8b_seed42.log
-#
-#STATUS_MED42=${PIPESTATUS[0]}
-#if [ "$STATUS_MED42" -eq 0 ]; then
-#    echo "[SUCCESS] Llama3-Med42-8B completed."
-#else
-#    echo "[WARNING] Llama3-Med42-8B failed with exit code $STATUS_MED42."
-#fi
+COMMON_ARGS=(
+  --n_samples 300
+  --max_pairs_per_task 200
+  --top_k 20
+  --k_values 5 10 15 20 30 50
+  --lambdas 0 0.5 1 2 4 8
+  --alphas 0.5 1 2 4
+  --num_random_controls 20
+  --min_denom 1.0
+  --min_margin 0.5
+  --batch_size 64
+  --bootstrap_samples 2000
+  --permutations 10000
+  --gen_max_samples 40
+  --layer_alphas 0.5 1 2 4 8
+  --safety_lambda 2.0
+  --harm_eps 0.10
+  --layer_criterion worst
+  --unfiltered_frac 0.2
+  --router_features vocab
+  --gen_splits unfiltered test
+  --audit_per_cell 5
+  --dtype bfloat16
+  --resume
+)
 
-# ==========================================
-# 2. MedGemma-4B-IT (4B Medical Specialist)
-# ==========================================
-#cleanup_gpu
-#echo "=========================================="
-#echo "Starting MedGemma-4B-IT"
-#echo "=========================================="
-#
-#python "$SCRIPT" \
-#    --model_name google/medgemma-4b-it \
-#    --n_samples 100 \
-#    --top_k 20 \
-#    --head_batch_size 32 \
-#    --k_values 5 10 15 20 30 50 \
-#    --denom_thresholds 0.0001 0.001 0.01 0.1 \
-#    --bootstrap_samples 2000 \
-#    --num_random_controls 20 \
-#    --control_samples 50 \
-#    --seed 42 \
-#    --output_dir /scratch/adityasrikar.c/medhalt/results/medgemma_4b_seed42 \
-#    --hf_repo_id "$HF_REPO" \
-#    2>&1 | tee /scratch/adityasrikar.c/medhalt/logs/medgemma_4b_seed42.log
-#
-#STATUS_MEDGEMMA=${PIPESTATUS[0]}
-#if [ "$STATUS_MEDGEMMA" -eq 0 ]; then
-#    echo "[SUCCESS] MedGemma-4B-IT completed."
-#else
-#    echo "[WARNING] MedGemma-4B-IT failed with exit code $STATUS_MEDGEMMA."
-#fi
-
-# ==========================================
-# 3. Mistral-7B-Instruct (Baseline General)
-# ==========================================
-#cleanup_gpu
-#echo "=========================================="
-#echo "Starting Mistral-7B-Instruct"
-#echo "=========================================="
-#
-#python "$SCRIPT" \
-#    --model_name mistralai/Mistral-7B-Instruct-v0.3 \
-#    --n_samples 100 \
-#    --top_k 20 \
-#    --head_batch_size 32 \
-#    --k_values 5 10 15 20 30 50 \
-#    --denom_thresholds 0.0001 0.001 0.01 0.1 \
-#    --bootstrap_samples 2000 \
-#    --num_random_controls 20 \
-#    --control_samples 50 \
-#    --seed 42 \
-#    --output_dir /scratch/adityasrikar.c/medhalt/results/mistral_7b_seed42_new \
-#    --hf_repo_id "$HF_REPO" \
-#    2>&1 | tee /scratch/adityasrikar.c/medhalt/results/mistral_7b_seed42_new/logs/mistral_7b_seed42_new.log
-#
-#STATUS_MISTRAL=${PIPESTATUS[0]}
-#if [ "$STATUS_MISTRAL" -eq 0 ]; then
-#    echo "[SUCCESS] Mistral-7B completed."
-#else
-#    echo "[WARNING] Mistral-7B failed with exit code $STATUS_MISTRAL. Continuing to next model..."
-#fi
-#
-## ==========================================
-## 4. Qwen3-8B (General Non-Thinking)
-## ==========================================
-#cleanup_gpu
-#echo "=========================================="
-#echo "Starting Qwen3-8B"
-#echo "=========================================="
-#
-#python "$SCRIPT" \
-#    --model_name Qwen/Qwen3-8B \
-#    --is_qwen \
-#    --n_samples 100 \
-#    --top_k 20 \
-#    --head_batch_size 32 \
-#    --k_values 5 10 15 20 30 50 \
-#    --denom_thresholds 0.0001 0.001 0.01 0.1 \
-#    --bootstrap_samples 2000 \
-#    --num_random_controls 20 \
-#    --control_samples 50 \
-#    --seed 42 \
-#    --output_dir /scratch/adityasrikar.c/medhalt/results/qwen3_8b_seed42_new \
-#    --hf_repo_id "$HF_REPO" \
-#    2>&1 | tee /scratch/adityasrikar.c/medhalt/results/qwen3_8b_seed42_new/logs/qwen3_8b_seed42_new.log
-#
-#STATUS_QWEN=${PIPESTATUS[0]}
-#if [ "$STATUS_QWEN" -eq 0 ]; then
-#    echo "[SUCCESS] Qwen3-8B completed."
-#else
-#    echo "[WARNING] Qwen3-8B failed with exit code $STATUS_QWEN. Continuing to next model..."
-#fi
-
-# ==========================================
-# 5. MediPhi-Instruct (3.8B Medical Specialist)
-# ==========================================
-cleanup_gpu
-echo "=========================================="
-echo "Starting MediPhi-Instruct-3.8B"
-echo "=========================================="
-
-python "$SCRIPT" \
-    --model_name microsoft/MediPhi-Instruct \
-    --n_samples 100 \
-    --top_k 20 \
-#    In ADA, take head_batch_size as 8
-#    --head_batch_size 8 \
-#    Otherwise in bigger compute, take head_batch_size as 16
-    --head_batch_size 32 \
-    --k_values 5 10 15 20 30 50 \
-    --denom_thresholds 0.0001 0.001 0.01 0.1 \
-    --bootstrap_samples 2000 \
-    --num_random_controls 20 \
-    --control_samples 50 \
-    --seed 42 \
-    --output_dir /scratch/adityasrikar.c/medhalt/results/mediphi_3.8b_seed42 \
-    --hf_repo_id "$HF_REPO" \
-    2>&1 | tee /scratch/adityasrikar.c/medhalt/logs/mediphi_3.8b_seed42.log
-
-STATUS_MEDIPHI=${PIPESTATUS[0]}
-if [ "$STATUS_MEDIPHI" -eq 0 ]; then
-    echo "[SUCCESS] MediPhi-Instruct completed."
-else
-    echo "[WARNING] MediPhi-Instruct failed with exit code $STATUS_MEDIPHI."
+# SMOKE=1 bash script.sh  -> one model, one seed, small sample: checks the full
+# pipeline on the GPU (and that steering changes predictions) in well under an hour.
+if [ "${SMOKE:-0}" = "1" ]; then
+  MODELS=("${MODELS[0]}")
+  SEEDS=(0)
+  RESULTS="$SCRATCH/results_v4_smoke"; LOGS="$SCRATCH/logs_v4_smoke"; mkdir -p "$RESULTS" "$LOGS"
+  COMMON_ARGS+=(--n_samples 120 --max_pairs_per_task 80 --k_values 10 20 --num_random_controls 5
+                --bootstrap_samples 500 --permutations 2000 --gen_max_samples 10)
+  echo "[smoke] ${MODELS[0]} seed 0, reduced sample sizes -> $RESULTS"
 fi
 
-cleanup_gpu
+declare -A STATUS
+for entry in "${MODELS[@]}"; do
+  tag="${entry%%|*}"
+  model="${entry#*|}"
+  for seed in "${SEEDS[@]}"; do
+    run="${tag}_seed${seed}"
+    out="$RESULTS/$run"
+    mkdir -p "$out"
+    echo "=========================================="
+    echo "Starting $model (seed $seed) -> $out"
+    echo "=========================================="
+    python "$SCRIPT" \
+      --model_name "$model" \
+      --seed "$seed" \
+      --output_dir "$out" \
+      --hf_repo_id "$HF_REPO" \
+      --hf_path_in_repo "v4/${model//\//_}/seed${seed}" \
+      "${COMMON_ARGS[@]}" \
+      2>&1 | tee "$LOGS/${run}.log"
+    STATUS[$run]=${PIPESTATUS[0]}
+    if [ "${STATUS[$run]}" -eq 0 ]; then
+      echo "[SUCCESS] $run"
+    else
+      echo "[WARNING] $run failed with exit code ${STATUS[$run]} (log: $LOGS/${run}.log). Continuing."
+    fi
+  done
+
+  # aggregate this model across whichever seeds finished
+  dirs=()
+  for seed in "${SEEDS[@]}"; do
+    [ -f "$RESULTS/${tag}_seed${seed}/summary.csv" ] && dirs+=("$RESULTS/${tag}_seed${seed}")
+  done
+  if [ "${#dirs[@]}" -gt 0 ]; then
+    python "$SCRIPT" --aggregate_dirs "${dirs[@]}" --output_dir "$RESULTS/${tag}_aggregate" \
+      2>&1 | tee -a "$LOGS/${tag}_aggregate.log"
+  fi
+done
 
 echo "=========================================="
 echo "RUN SUMMARY"
 echo "=========================================="
-#echo "Med42-8B:       Exit code $STATUS_MED42"
-#echo "MedGemma-4B-IT:       Exit code $STATUS_MEDGEMMA"
-#echo "Mistral-7B:     Exit code $STATUS_MISTRAL"
-#echo "Qwen3-8B:       Exit code $STATUS_QWEN"
-echo "MediPhi-Instruct:       Exit code $STATUS_MEDIPHI"
+for run in "${!STATUS[@]}"; do
+  printf "%-24s exit %s\n" "$run" "${STATUS[$run]}"
+done | sort
 echo "=========================================="
