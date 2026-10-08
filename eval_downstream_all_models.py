@@ -70,27 +70,33 @@ def load_dataset_samples(dataset_name: str, n_samples: int) -> List[Dict]:
         samples = []
         for row in ds.select(range(min(n_samples, len(ds)))):
             p, pf = format_medqa_prompt(row["question"], row["options"])
-            samples.append({
-                "prompt": p,
-                "prefill": pf,
-                "gold_str": row["answer_idx"],
-                "cand_strings": [" " + l for l in MCQ_LETTERS],
-                "cand_labels": MCQ_LETTERS,
-            })
+            samples.append(
+                {
+                    "prompt": p,
+                    "prefill": pf,
+                    "gold_str": row["answer_idx"],
+                    "cand_strings": [" " + l for l in MCQ_LETTERS],
+                    "cand_labels": MCQ_LETTERS,
+                }
+            )
         return samples
     elif dataset_name == "pubmedqa":
-        log(f"[Data] Loading PubMedQA (pqa_labeled) train split ({n_samples} samples)...")
+        log(
+            f"[Data] Loading PubMedQA (pqa_labeled) train split ({n_samples} samples)..."
+        )
         ds = load_dataset("qiaojin/PubMedQA", "pqa_labeled", split="train")
         samples = []
         for row in ds.select(range(min(n_samples, len(ds)))):
             p, pf = format_pubmedqa_prompt(row["question"], row["context"])
-            samples.append({
-                "prompt": p,
-                "prefill": pf,
-                "gold_str": row["final_decision"].strip().lower(),
-                "cand_strings": [" " + l for l in PUBMED_LABELS],
-                "cand_labels": PUBMED_LABELS,
-            })
+            samples.append(
+                {
+                    "prompt": p,
+                    "prefill": pf,
+                    "gold_str": row["final_decision"].strip().lower(),
+                    "cand_strings": [" " + l for l in PUBMED_LABELS],
+                    "cand_labels": PUBMED_LABELS,
+                }
+            )
         return samples
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
@@ -115,14 +121,20 @@ def load_steering_artifacts(results_dir: str, tag: str, seed: int, protocol: str
     vec_name = str(cfg.vec)
 
     st_dir = os.path.join(run_dir, "state")
-    v_fct = torch.stack([
-        b["resid_clean"].float() - b["resid_corrupt"].float()
-        for b in torch.load(os.path.join(st_dir, "base_FCT.pt"), weights_only=False)
-    ]).mean(0)
-    v_nota = torch.stack([
-        b["resid_clean"].float() - b["resid_corrupt"].float()
-        for b in torch.load(os.path.join(st_dir, "base_NOTA.pt"), weights_only=False)
-    ]).mean(0)
+    v_fct = torch.stack(
+        [
+            b["resid_clean"].float() - b["resid_corrupt"].float()
+            for b in torch.load(os.path.join(st_dir, "base_FCT.pt"), weights_only=False)
+        ]
+    ).mean(0)
+    v_nota = torch.stack(
+        [
+            b["resid_clean"].float() - b["resid_corrupt"].float()
+            for b in torch.load(
+                os.path.join(st_dir, "base_NOTA.pt"), weights_only=False
+            )
+        ]
+    ).mean(0)
 
     if vec_name == "FCT" or "FCT" in vec_name:
         steer_vec = v_fct
@@ -161,36 +173,61 @@ def eval_model_on_dataset(
         base_logits = st.cand_logits.numpy()
         pred_base = int(base_logits.argmax())
 
-        iv = [Intervention(resid_layers=np.array([layer]), resid_alpha=alpha, resid_src=0)]
-        steered_logits = engine.run_interventions(st, iv, steer_resid=steer_tensor, batch_size=batch_size)[0]
+        iv = [
+            Intervention(resid_layers=np.array([layer]), resid_alpha=alpha, resid_src=0)
+        ]
+        steered_logits = engine.run_interventions(
+            st, iv, steer_resid=steer_tensor, batch_size=batch_size
+        )[0]
         pred_steered = int(steered_logits.argmax())
 
         # Candidate-free next-token normalized entropy as deployable router proxy
-        risk_score = float(st.vocab_stats[0]) / max(np.log(engine.tokenizer.vocab_size), 1e-6)
+        risk_score = float(st.vocab_stats[0]) / max(
+            np.log(engine.tokenizer.vocab_size), 1e-6
+        )
         steered = bool(risk_score > tau)
         pred_gated = pred_steered if steered else pred_base
 
-        rows.append({
-            "sample_id": i,
-            "gold": s["gold_str"],
-            "correct_base": bool(pred_base == gold_idx),
-            "correct_always": bool(pred_steered == gold_idx),
-            "steered_gated": steered,
-            "correct_gated": bool(pred_gated == gold_idx),
-        })
+        rows.append(
+            {
+                "sample_id": i,
+                "gold": s["gold_str"],
+                "correct_base": bool(pred_base == gold_idx),
+                "correct_always": bool(pred_steered == gold_idx),
+                "steered_gated": steered,
+                "correct_gated": bool(pred_gated == gold_idx),
+            }
+        )
 
     return pd.DataFrame(rows)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Multi-model downstream audit on MedQA & PubMedQA")
-    ap.add_argument("--results_dir", default="/scratch/adityasrikar.c/medhalt/results_v4",
-                    help="Base scratch directory containing results_v4 runs")
-    ap.add_argument("--seed", type=int, default=0, help="Seed run to pull steering vectors from")
-    ap.add_argument("--protocol", default="loto", choices=["loto", "pooled", "source:FCT", "source:NOTA"])
-    ap.add_argument("--n_medqa", type=int, default=200, help="Number of MedQA test samples")
-    ap.add_argument("--n_pubmedqa", type=int, default=200, help="Number of PubMedQA test samples")
-    ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    ap = argparse.ArgumentParser(
+        description="Multi-model downstream audit on MedQA & PubMedQA"
+    )
+    ap.add_argument(
+        "--results_dir",
+        default="/scratch/adityasrikar.c/medhalt/results_v4",
+        help="Base scratch directory containing results_v4 runs",
+    )
+    ap.add_argument(
+        "--seed", type=int, default=0, help="Seed run to pull steering vectors from"
+    )
+    ap.add_argument(
+        "--protocol",
+        default="loto",
+        choices=["loto", "pooled", "source:FCT", "source:NOTA"],
+    )
+    ap.add_argument(
+        "--n_medqa", type=int, default=200, help="Number of MedQA test samples"
+    )
+    ap.add_argument(
+        "--n_pubmedqa", type=int, default=200, help="Number of PubMedQA test samples"
+    )
+    ap.add_argument(
+        "--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"]
+    )
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--output_dir", default="./downstream_audit_results")
     args = ap.parse_args()
@@ -204,7 +241,9 @@ def main():
     for tag, model_name in MODELS:
         log(f"\n{'='*70}\n[Model] Auditing {model_name} ({tag})\n{'='*70}")
         try:
-            layer, alpha, tau, steer_vec = load_steering_artifacts(args.results_dir, tag, args.seed, args.protocol)
+            layer, alpha, tau, steer_vec = load_steering_artifacts(
+                args.results_dir, tag, args.seed, args.protocol
+            )
             log(f"[Artifacts] Layer: {layer}, Alpha: {alpha:.2f}, Tau: {tau:.3f}")
         except Exception as e:
             log(f"[SKIP] Could not load artifacts for {tag}: {e}")
@@ -212,10 +251,17 @@ def main():
 
         engine = CausalEngine(model_name, dtype=args.dtype)
 
-        for d_name, d_samples in [("MedQA", medqa_samples), ("PubMedQA", pubmedqa_samples)]:
+        for d_name, d_samples in [
+            ("MedQA", medqa_samples),
+            ("PubMedQA", pubmedqa_samples),
+        ]:
             log(f"[Run] Evaluating {d_name} ({len(d_samples)} items)...")
-            df = eval_model_on_dataset(engine, d_samples, layer, alpha, tau, steer_vec, args.batch_size)
-            csv_path = os.path.join(args.output_dir, f"{tag}_{d_name.lower()}_predictions.csv")
+            df = eval_model_on_dataset(
+                engine, d_samples, layer, alpha, tau, steer_vec, args.batch_size
+            )
+            csv_path = os.path.join(
+                args.output_dir, f"{tag}_{d_name.lower()}_predictions.csv"
+            )
             df.to_csv(csv_path, index=False)
 
             n = len(df)
@@ -232,25 +278,27 @@ def main():
             ucb_always = wilson_upper(induced_always, n_corr)
             ucb_gated = wilson_upper(induced_gated, n_corr)
 
-            summary_records.append({
-                "model_tag": tag,
-                "model_name": model_name,
-                "dataset": d_name,
-                "n_samples": n,
-                "acc_base": acc_base,
-                "acc_always": acc_always,
-                "acc_gated": acc_gated,
-                "delta_always": acc_always - acc_base,
-                "delta_gated": acc_gated - acc_base,
-                "gate_rate": float(df.steered_gated.mean()),
-                "induced_always": induced_always,
-                "rescued_always": rescued_always,
-                "induced_gated": induced_gated,
-                "rescued_gated": rescued_gated,
-                "ucb_always": ucb_always,
-                "ucb_gated": ucb_gated,
-                "p_mcnemar_gated": mcnemar_exact(rescued_gated, induced_gated),
-            })
+            summary_records.append(
+                {
+                    "model_tag": tag,
+                    "model_name": model_name,
+                    "dataset": d_name,
+                    "n_samples": n,
+                    "acc_base": acc_base,
+                    "acc_always": acc_always,
+                    "acc_gated": acc_gated,
+                    "delta_always": acc_always - acc_base,
+                    "delta_gated": acc_gated - acc_base,
+                    "gate_rate": float(df.steered_gated.mean()),
+                    "induced_always": induced_always,
+                    "rescued_always": rescued_always,
+                    "induced_gated": induced_gated,
+                    "rescued_gated": rescued_gated,
+                    "ucb_always": ucb_always,
+                    "ucb_gated": ucb_gated,
+                    "p_mcnemar_gated": mcnemar_exact(rescued_gated, induced_gated),
+                }
+            )
 
         del engine
         gc.collect()
@@ -263,10 +311,22 @@ def main():
     print("\n" + "=" * 90)
     print("                DOWNSTREAM ZERO-DEGRADATION SUMMARY REPORT                 ")
     print("=" * 90)
-    print(summary_df[[
-        "model_tag", "dataset", "acc_base", "acc_gated", "delta_gated",
-        "gate_rate", "ucb_gated", "p_mcnemar_gated"
-    ]].round(4).to_string(index=False))
+    print(
+        summary_df[
+            [
+                "model_tag",
+                "dataset",
+                "acc_base",
+                "acc_gated",
+                "delta_gated",
+                "gate_rate",
+                "ucb_gated",
+                "p_mcnemar_gated",
+            ]
+        ]
+        .round(4)
+        .to_string(index=False)
+    )
     print("=" * 90)
     log(f"Wrote summary table to {sum_path}")
 

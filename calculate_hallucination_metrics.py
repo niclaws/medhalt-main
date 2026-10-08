@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-
 # ============================================================
 # Interpretation
 # ============================================================
@@ -87,16 +86,10 @@ def calculate_group_metrics(group):
     induced_count = int(induced_mask.sum())
     initially_correct_count = int(before_correct.sum())
 
-    hallucination_induction_rate = safe_div(
-        induced_count,
-        initially_correct_count
-    )
+    hallucination_induction_rate = safe_div(induced_count, initially_correct_count)
 
     # Fraction over ALL samples, useful as a secondary metric.
-    hallucination_induction_rate_all = safe_div(
-        induced_count,
-        n
-    )
+    hallucination_induction_rate_all = safe_div(induced_count, n)
 
     # --------------------------------------------------------
     # Hallucination rescue
@@ -109,15 +102,9 @@ def calculate_group_metrics(group):
 
     rescue_count = int(rescue_mask.sum())
 
-    hallucination_rescue_rate = safe_div(
-        rescue_count,
-        pre_halluc_count
-    )
+    hallucination_rescue_rate = safe_div(rescue_count, pre_halluc_count)
 
-    hallucination_rescue_rate_all = safe_div(
-        rescue_count,
-        n
-    )
+    hallucination_rescue_rate_all = safe_div(rescue_count, n)
 
     # --------------------------------------------------------
     # Hallucination persistence
@@ -129,10 +116,7 @@ def calculate_group_metrics(group):
 
     persistence_count = int(persistence_mask.sum())
 
-    hallucination_persistence_rate = safe_div(
-        persistence_count,
-        pre_halluc_count
-    )
+    hallucination_persistence_rate = safe_div(persistence_count, pre_halluc_count)
 
     # --------------------------------------------------------
     # Correct preference retention
@@ -144,10 +128,7 @@ def calculate_group_metrics(group):
 
     correct_retention_count = int(correct_retention_mask.sum())
 
-    correct_retention_rate = safe_div(
-        correct_retention_count,
-        initially_correct_count
-    )
+    correct_retention_rate = safe_div(correct_retention_count, initially_correct_count)
 
     # --------------------------------------------------------
     # Change in hallucination probability
@@ -158,8 +139,7 @@ def calculate_group_metrics(group):
 
     hallucination_rate_change = (
         post_halluc_rate - pre_halluc_rate
-        if np.isfinite(post_halluc_rate)
-        and np.isfinite(pre_halluc_rate)
+        if np.isfinite(post_halluc_rate) and np.isfinite(pre_halluc_rate)
         else np.nan
     )
 
@@ -188,59 +168,46 @@ def calculate_group_metrics(group):
     # --------------------------------------------------------
 
     if "normalized_transfer" in group.columns:
-        negative_transfer_rate = (
-            group["normalized_transfer"] < 0
-        ).mean()
+        negative_transfer_rate = (group["normalized_transfer"] < 0).mean()
 
         mean_transfer = group["normalized_transfer"].mean()
         median_transfer = group["normalized_transfer"].median()
 
-        overshoot_rate = (
-            group["normalized_transfer"] > 1
-        ).mean()
+        overshoot_rate = (group["normalized_transfer"] > 1).mean()
     else:
         negative_transfer_rate = np.nan
         mean_transfer = np.nan
         median_transfer = np.nan
         overshoot_rate = np.nan
 
-    return pd.Series({
-        "valid_samples": n,
-
-        "pre_hallucination_count": pre_halluc_count,
-        "post_hallucination_count": post_halluc_count,
-
-        "pre_hallucination_rate": pre_halluc_rate,
-        "post_hallucination_rate": post_halluc_rate,
-
-        "initially_correct_count": initially_correct_count,
-
-        "transfer_induced_hallucination_count": induced_count,
-        "hallucination_induction_rate": hallucination_induction_rate,
-        "hallucination_induction_rate_all": hallucination_induction_rate_all,
-
-        "hallucination_rescue_count": rescue_count,
-        "hallucination_rescue_rate": hallucination_rescue_rate,
-        "hallucination_rescue_rate_all": hallucination_rescue_rate_all,
-
-        "hallucination_persistence_count": persistence_count,
-        "hallucination_persistence_rate": hallucination_persistence_rate,
-
-        "correct_retention_count": correct_retention_count,
-        "correct_retention_rate": correct_retention_rate,
-
-        "hallucination_rate_change": hallucination_rate_change,
-        "hallucination_rate_change_pp": hallucination_rate_change_pp,
-
-        "mean_logit_shift": mean_logit_shift,
-        "median_logit_shift": median_logit_shift,
-
-        "negative_transfer_rate": negative_transfer_rate,
-        "overshoot_rate": overshoot_rate,
-
-        "mean_normalized_transfer": mean_transfer,
-        "median_normalized_transfer": median_transfer,
-    })
+    return pd.Series(
+        {
+            "valid_samples": n,
+            "pre_hallucination_count": pre_halluc_count,
+            "post_hallucination_count": post_halluc_count,
+            "pre_hallucination_rate": pre_halluc_rate,
+            "post_hallucination_rate": post_halluc_rate,
+            "initially_correct_count": initially_correct_count,
+            "transfer_induced_hallucination_count": induced_count,
+            "hallucination_induction_rate": hallucination_induction_rate,
+            "hallucination_induction_rate_all": hallucination_induction_rate_all,
+            "hallucination_rescue_count": rescue_count,
+            "hallucination_rescue_rate": hallucination_rescue_rate,
+            "hallucination_rescue_rate_all": hallucination_rescue_rate_all,
+            "hallucination_persistence_count": persistence_count,
+            "hallucination_persistence_rate": hallucination_persistence_rate,
+            "correct_retention_count": correct_retention_count,
+            "correct_retention_rate": correct_retention_rate,
+            "hallucination_rate_change": hallucination_rate_change,
+            "hallucination_rate_change_pp": hallucination_rate_change_pp,
+            "mean_logit_shift": mean_logit_shift,
+            "median_logit_shift": median_logit_shift,
+            "negative_transfer_rate": negative_transfer_rate,
+            "overshoot_rate": overshoot_rate,
+            "mean_normalized_transfer": mean_transfer,
+            "median_normalized_transfer": median_transfer,
+        }
+    )
 
 
 def save_heatmap(
@@ -252,21 +219,12 @@ def save_heatmap(
 ):
     subset = summary[summary["k"] == k].copy()
 
-    matrix = subset.pivot(
-        index="source_task",
-        columns="target_task",
-        values=metric
-    )
+    matrix = subset.pivot(index="source_task", columns="target_task", values=metric)
 
     # Keep a consistent ordering
-    tasks = sorted(
-        set(matrix.index).union(matrix.columns)
-    )
+    tasks = sorted(set(matrix.index).union(matrix.columns))
 
-    matrix = matrix.reindex(
-        index=tasks,
-        columns=tasks
-    )
+    matrix = matrix.reindex(index=tasks, columns=tasks)
 
     # If we only care about cross-task effects,
     # remove source == target diagonal.
@@ -277,17 +235,10 @@ def save_heatmap(
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    im = ax.imshow(
-        matrix.to_numpy(dtype=float),
-        aspect="auto"
-    )
+    im = ax.imshow(matrix.to_numpy(dtype=float), aspect="auto")
 
     ax.set_xticks(range(len(matrix.columns)))
-    ax.set_xticklabels(
-        matrix.columns,
-        rotation=35,
-        ha="right"
-    )
+    ax.set_xticklabels(matrix.columns, rotation=35, ha="right")
 
     ax.set_yticks(range(len(matrix.index)))
     ax.set_yticklabels(matrix.index)
@@ -297,9 +248,7 @@ def save_heatmap(
 
     readable_name = metric.replace("_", " ").title()
 
-    ax.set_title(
-        f"{readable_name} (k={k})"
-    )
+    ax.set_title(f"{readable_name} (k={k})")
 
     values = matrix.to_numpy(dtype=float)
 
@@ -308,22 +257,12 @@ def save_heatmap(
             value = values[i, j]
 
             if np.isfinite(value):
-                ax.text(
-                    j,
-                    i,
-                    f"{value:.3f}",
-                    ha="center",
-                    va="center"
-                )
+                ax.text(j, i, f"{value:.3f}", ha="center", va="center")
 
     fig.colorbar(im, ax=ax)
 
     fig.tight_layout()
-    fig.savefig(
-        output_path,
-        dpi=200,
-        bbox_inches="tight"
-    )
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
 
     plt.close(fig)
 
@@ -334,10 +273,7 @@ def save_k_curve(summary, output_path):
     source -> target task pairs for each k.
     """
 
-    cross = summary[
-        summary["source_task"]
-        != summary["target_task"]
-    ].copy()
+    cross = summary[summary["source_task"] != summary["target_task"]].copy()
 
     metrics = [
         "hallucination_induction_rate",
@@ -345,13 +281,7 @@ def save_k_curve(summary, output_path):
         "post_hallucination_rate",
     ]
 
-    grouped = (
-        cross
-        .groupby("k")[metrics]
-        .mean()
-        .reset_index()
-        .sort_values("k")
-    )
+    grouped = cross.groupby("k")[metrics].mean().reset_index().sort_values("k")
 
     fig, ax = plt.subplots(figsize=(9, 6))
 
@@ -360,26 +290,20 @@ def save_k_curve(summary, output_path):
             grouped["k"],
             grouped[metric],
             marker="o",
-            label=metric.replace("_", " ").title()
+            label=metric.replace("_", " ").title(),
         )
 
     ax.set_xlabel("Circuit Size k")
     ax.set_ylabel("Mean Cross-Task Rate")
 
-    ax.set_title(
-        "Cross-Task Hallucination Metrics vs Circuit Size"
-    )
+    ax.set_title("Cross-Task Hallucination Metrics vs Circuit Size")
 
     ax.legend()
     ax.grid(alpha=0.25)
 
     fig.tight_layout()
 
-    fig.savefig(
-        output_path,
-        dpi=200,
-        bbox_inches="tight"
-    )
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
 
     plt.close(fig)
 
@@ -390,34 +314,18 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--input",
-        required=True,
-        help="Path to *_per_sample_transfer.csv"
+        "--input", required=True, help="Path to *_per_sample_transfer.csv"
     )
 
-    parser.add_argument(
-        "--output_dir",
-        default="hallucination_analysis"
-    )
+    parser.add_argument("--output_dir", default="hallucination_analysis")
 
-    parser.add_argument(
-        "--min_denom",
-        type=float,
-        default=1e-4
-    )
+    parser.add_argument("--min_denom", type=float, default=1e-4)
 
-    parser.add_argument(
-        "--primary_k",
-        type=int,
-        default=20
-    )
+    parser.add_argument("--primary_k", type=int, default=20)
 
     args = parser.parse_args()
 
-    os.makedirs(
-        args.output_dir,
-        exist_ok=True
-    )
+    os.makedirs(args.output_dir, exist_ok=True)
 
     # ========================================================
     # Load results
@@ -433,24 +341,14 @@ def main():
         "d_patched",
     ]
 
-    missing = [
-        c for c in required_columns
-        if c not in df.columns
-    ]
+    missing = [c for c in required_columns if c not in df.columns]
 
     if missing:
-        raise ValueError(
-            f"Missing required columns: {missing}"
-        )
+        raise ValueError(f"Missing required columns: {missing}")
 
-    print(
-        f"Loaded {len(df):,} rows"
-    )
+    print(f"Loaded {len(df):,} rows")
 
-    print(
-        "k values:",
-        sorted(df["k"].unique())
-    )
+    print("k values:", sorted(df["k"].unique()))
 
     # ========================================================
     # Filter unusable rows
@@ -465,83 +363,48 @@ def main():
                 df["patched"]
                 .astype(str)
                 .str.lower()
-                .map({
-                    "true": True,
-                    "false": False
-                })
+                .map({"true": True, "false": False})
             )
 
         df = df[df["patched"] == True].copy()
 
-    df = df[
-        np.isfinite(df["d_corrupt"])
-        & np.isfinite(df["d_patched"])
-    ].copy()
+    df = df[np.isfinite(df["d_corrupt"]) & np.isfinite(df["d_patched"])].copy()
 
     # Apply same denominator protection as original experiment.
     if "abs_denominator" in df.columns:
-        df = df[
-            df["abs_denominator"]
-            >= args.min_denom
-        ].copy()
+        df = df[df["abs_denominator"] >= args.min_denom].copy()
 
     elif "denominator" in df.columns:
-        df = df[
-            df["denominator"].abs()
-            >= args.min_denom
-        ].copy()
+        df = df[df["denominator"].abs() >= args.min_denom].copy()
 
-    print(
-        f"Valid rows after filtering: {len(df):,}"
-    )
+    print(f"Valid rows after filtering: {len(df):,}")
 
     # ========================================================
     # Add sample-level transition labels
     # ========================================================
 
-    df["pre_hallucination"] = (
-        df["d_corrupt"] < 0
-    )
+    df["pre_hallucination"] = df["d_corrupt"] < 0
 
-    df["post_hallucination"] = (
+    df["post_hallucination"] = df["d_patched"] < 0
+
+    df["transfer_induced_hallucination"] = (df["d_corrupt"] >= 0) & (
         df["d_patched"] < 0
     )
 
-    df["transfer_induced_hallucination"] = (
-        (df["d_corrupt"] >= 0)
-        & (df["d_patched"] < 0)
-    )
+    df["hallucination_rescued"] = (df["d_corrupt"] < 0) & (df["d_patched"] >= 0)
 
-    df["hallucination_rescued"] = (
-        (df["d_corrupt"] < 0)
-        & (df["d_patched"] >= 0)
-    )
+    df["hallucination_persisted"] = (df["d_corrupt"] < 0) & (df["d_patched"] < 0)
 
-    df["hallucination_persisted"] = (
-        (df["d_corrupt"] < 0)
-        & (df["d_patched"] < 0)
-    )
+    df["correct_preference_retained"] = (df["d_corrupt"] >= 0) & (df["d_patched"] >= 0)
 
-    df["correct_preference_retained"] = (
-        (df["d_corrupt"] >= 0)
-        & (df["d_patched"] >= 0)
-    )
-
-    df["logit_shift"] = (
-        df["d_patched"]
-        - df["d_corrupt"]
-    )
+    df["logit_shift"] = df["d_patched"] - df["d_corrupt"]
 
     # Save enriched sample-level CSV
     enriched_path = os.path.join(
-        args.output_dir,
-        "per_sample_transfer_with_hallucination_labels.csv"
+        args.output_dir, "per_sample_transfer_with_hallucination_labels.csv"
     )
 
-    df.to_csv(
-        enriched_path,
-        index=False
-    )
+    df.to_csv(enriched_path, index=False)
 
     # ========================================================
     # Aggregate source -> target -> k
@@ -554,46 +417,25 @@ def main():
     ]
 
     if "model" in df.columns:
-        group_columns = [
-            "model",
-            *group_columns
-        ]
+        group_columns = ["model", *group_columns]
 
     summary = (
-        df
-        .groupby(
-            group_columns,
-            dropna=False
-        )
-        .apply(
-            calculate_group_metrics,
-            include_groups=False
-        )
+        df.groupby(group_columns, dropna=False)
+        .apply(calculate_group_metrics, include_groups=False)
         .reset_index()
     )
 
-    summary_path = os.path.join(
-        args.output_dir,
-        "cross_task_hallucination_metrics.csv"
-    )
+    summary_path = os.path.join(args.output_dir, "cross_task_hallucination_metrics.csv")
 
-    summary.to_csv(
-        summary_path,
-        index=False
-    )
+    summary.to_csv(summary_path, index=False)
 
-    print(
-        f"\nSaved:\n{summary_path}"
-    )
+    print(f"\nSaved:\n{summary_path}")
 
     # ========================================================
     # Overall cross-task averages for every k
     # ========================================================
 
-    cross = summary[
-        summary["source_task"]
-        != summary["target_task"]
-    ].copy()
+    cross = summary[summary["source_task"] != summary["target_task"]].copy()
 
     important_metrics = [
         "pre_hallucination_rate",
@@ -607,34 +449,18 @@ def main():
     ]
 
     k_summary = (
-        cross
-        .groupby("k")[important_metrics]
-        .mean()
-        .reset_index()
-        .sort_values("k")
+        cross.groupby("k")[important_metrics].mean().reset_index().sort_values("k")
     )
 
-    k_summary_path = os.path.join(
-        args.output_dir,
-        "cross_task_hallucination_by_k.csv"
-    )
+    k_summary_path = os.path.join(args.output_dir, "cross_task_hallucination_by_k.csv")
 
-    k_summary.to_csv(
-        k_summary_path,
-        index=False
-    )
+    k_summary.to_csv(k_summary_path, index=False)
 
-    print(
-        f"Saved:\n{k_summary_path}"
-    )
+    print(f"Saved:\n{k_summary_path}")
 
-    print(
-        "\nCross-task hallucination summary by k:"
-    )
+    print("\nCross-task hallucination summary by k:")
 
-    print(
-        k_summary.to_string(index=False)
-    )
+    print(k_summary.to_string(index=False))
 
     # ========================================================
     # Heatmaps for every k
@@ -651,10 +477,7 @@ def main():
 
         for metric in heatmap_metrics:
 
-            output_path = os.path.join(
-                args.output_dir,
-                f"{metric}_k{k}.png"
-            )
+            output_path = os.path.join(args.output_dir, f"{metric}_k{k}.png")
 
             save_heatmap(
                 summary,
@@ -669,40 +492,25 @@ def main():
     # ========================================================
 
     grouped = save_k_curve(
-        summary,
-        os.path.join(
-            args.output_dir,
-            "cross_task_hallucination_vs_k.png"
-        )
+        summary, os.path.join(args.output_dir, "cross_task_hallucination_vs_k.png")
     )
 
     grouped.to_csv(
-        os.path.join(
-            args.output_dir,
-            "cross_task_hallucination_plot_values.csv"
-        ),
-        index=False
+        os.path.join(args.output_dir, "cross_task_hallucination_plot_values.csv"),
+        index=False,
     )
 
     # ========================================================
     # Print primary k
     # ========================================================
 
-    primary = cross[
-        cross["k"] == args.primary_k
-    ].copy()
+    primary = cross[cross["k"] == args.primary_k].copy()
 
-    print(
-        f"\n======================================"
-    )
+    print(f"\n======================================")
 
-    print(
-        f"CROSS-TASK RESULTS AT k={args.primary_k}"
-    )
+    print(f"CROSS-TASK RESULTS AT k={args.primary_k}")
 
-    print(
-        f"======================================\n"
-    )
+    print(f"======================================\n")
 
     columns_to_show = [
         "source_task",
@@ -717,9 +525,7 @@ def main():
 
     print(
         primary[columns_to_show]
-        .sort_values(
-            ["source_task", "target_task"]
-        )
+        .sort_values(["source_task", "target_task"])
         .to_string(index=False)
     )
 

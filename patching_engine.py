@@ -115,7 +115,9 @@ class Intervention:
     patch: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
     steer: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
     alpha: float = 0.0
-    resid_layers: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
+    resid_layers: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.int64)
+    )
     resid_alpha: float = 0.0
     resid_src: int = 0
 
@@ -130,7 +132,9 @@ class RunState:
     cand_ids: torch.Tensor  # [n_cand] long (device)
     cand_logits: torch.Tensor  # [n_cand] fp32 (cpu)
     vocab_entropy: float
-    vocab_stats: np.ndarray  # [entropy, top-1 prob, top1-top2 logit margin] over the FULL vocabulary
+    vocab_stats: (
+        np.ndarray
+    )  # [entropy, top-1 prob, top1-top2 logit margin] over the FULL vocabulary
     z: torch.Tensor  # [L, H*d] o_proj input at last position (device, model dtype)
     mlp: torch.Tensor  # [L, D] mlp output at last position
     resid: torch.Tensor  # [L, D] decoder-layer output at last position
@@ -143,7 +147,10 @@ def vocab_stats(logits: torch.Tensor) -> np.ndarray:
     logp = torch.log_softmax(logits, dim=-1)
     ent = float(-(logp.exp() * logp).sum().item())
     top = torch.topk(logits, 2).values
-    return np.array([ent, float(logp.max().exp().item()), float((top[0] - top[1]).item())], dtype=np.float64)
+    return np.array(
+        [ent, float(logp.max().exp().item()), float((top[0] - top[1]).item())],
+        dtype=np.float64,
+    )
 
 
 # =====================================================================
@@ -168,19 +175,29 @@ class CausalEngine:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        torch_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}[dtype]
+        torch_dtype = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }[dtype]
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
         import transformers
         from packaging import version
 
-        dtype_kw = "dtype" if version.parse(transformers.__version__) >= version.parse("4.56") else "torch_dtype"
+        dtype_kw = (
+            "dtype"
+            if version.parse(transformers.__version__) >= version.parse("4.56")
+            else "torch_dtype"
+        )
         kwargs = {dtype_kw: torch_dtype, "trust_remote_code": trust_remote_code}
         if attn_implementation:
             kwargs["attn_implementation"] = attn_implementation
         log(f"[Engine] Loading model ({dtype}) on {self.device}")
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs).to(self.device)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs).to(
+            self.device
+        )
         self.model.eval()
         self.dtype = torch_dtype
 
@@ -190,14 +207,18 @@ class CausalEngine:
         self.num_heads = int(cfg.num_attention_heads)
         self.hidden_size = int(cfg.hidden_size)
         head_dim = getattr(cfg, "head_dim", None)
-        self.head_dim = int(head_dim) if head_dim else self.hidden_size // self.num_heads
+        self.head_dim = (
+            int(head_dim) if head_dim else self.hidden_size // self.num_heads
+        )
 
         self.o_projs, self.mlps = [], []
         for i, layer in enumerate(self.layers):
             attn = getattr(layer, "self_attn", None)
             o_proj = getattr(attn, "o_proj", None) if attn is not None else None
             if o_proj is None:
-                raise AttributeError(f"Layer {i} has no self_attn.o_proj; head patching unsupported.")
+                raise AttributeError(
+                    f"Layer {i} has no self_attn.o_proj; head patching unsupported."
+                )
             if o_proj.in_features != self.num_heads * self.head_dim:
                 raise ValueError(
                     f"Layer {i}: o_proj.in_features={o_proj.in_features} != "
@@ -227,7 +248,11 @@ class CausalEngine:
                 cur = getattr(cur, p, None)
                 if cur is None:
                     break
-            if isinstance(cur, torch.nn.ModuleList) and len(cur) and hasattr(cur[0], "self_attn"):
+            if (
+                isinstance(cur, torch.nn.ModuleList)
+                and len(cur)
+                and hasattr(cur[0], "self_attn")
+            ):
                 return cur
         cands = [
             (len(m), m)
@@ -238,7 +263,9 @@ class CausalEngine:
             and "vision" not in n.lower()
         ]
         if not cands:
-            raise AttributeError(f"Could not locate decoder layers in {self.model_name}")
+            raise AttributeError(
+                f"Could not locate decoder layers in {self.model_name}"
+            )
         return max(cands, key=lambda x: x[0])[1]
 
     # ------------------------------------------------------------------
@@ -264,7 +291,9 @@ class CausalEngine:
         # The rendered template already contains BOS where the model expects it.
         return self.tokenizer(text, add_special_tokens=False)["input_ids"]
 
-    def continuation_ids(self, prompt_text: str, prompt_ids: List[int], cont: str) -> Optional[List[int]]:
+    def continuation_ids(
+        self, prompt_text: str, prompt_ids: List[int], cont: str
+    ) -> Optional[List[int]]:
         """Token ids of `cont` as the tokenizer splits it *after* prompt_text."""
         full = self.encode(prompt_text + cont)
         n = len(prompt_ids)
@@ -292,7 +321,9 @@ class CausalEngine:
 
         cache = DynamicCache()
         for i, (k, v) in enumerate(kv):
-            cache.update(k.expand(batch, *k.shape[1:]), v.expand(batch, *v.shape[1:]), i)
+            cache.update(
+                k.expand(batch, *k.shape[1:]), v.expand(batch, *v.shape[1:]), i
+            )
         return cache
 
     # ------------------------------------------------------------------
@@ -319,18 +350,21 @@ class CausalEngine:
         def zhook(l):
             def f(mod, args):
                 z[l] = args[0][0, -1].detach()
+
             return f
 
         def mhook(l):
             def f(mod, inp, outp):
                 o = outp[0] if isinstance(outp, tuple) else outp
                 mlp[l] = o[0, -1].detach()
+
             return f
 
         def rhook(l):
             def f(mod, inp, outp):
                 o = outp[0] if isinstance(outp, tuple) else outp
                 resid[l] = o[0, -1].detach()
+
             return f
 
         for l in range(L):
@@ -366,16 +400,20 @@ class CausalEngine:
         )
 
     @torch.inference_mode()
-    def prompt_features(self, input_ids: Sequence[int]) -> Tuple[np.ndarray, torch.Tensor]:
+    def prompt_features(
+        self, input_ids: Sequence[int]
+    ) -> Tuple[np.ndarray, torch.Tensor]:
         """Candidate-free features at the last prompt token: full-vocabulary
         [entropy, top-1 prob, top1-top2 margin] and the per-layer residual."""
         ids = torch.tensor([list(input_ids)], dtype=torch.long, device=self.device)
         resid = [None] * self.num_layers
         handles = []
         for l in range(self.num_layers):
+
             def f(mod, inp, outp, l=l):
                 o = outp[0] if isinstance(outp, tuple) else outp
                 resid[l] = o[0, -1].detach()
+
             handles.append(self.layers[l].register_forward_hook(f))
         try:
             logits = self.model(input_ids=ids).logits[0, -1].float()
@@ -432,7 +470,9 @@ class CausalEngine:
         bs = min(batch_size, getattr(self, "_safe_batch", batch_size))
         while True:
             try:
-                return self._run_interventions(state, interventions, source, steer_z, steer_mlp, bs, steer_resid)
+                return self._run_interventions(
+                    state, interventions, source, steer_z, steer_mlp, bs, steer_resid
+                )
             except torch.cuda.OutOfMemoryError:
                 if bs == 1:
                     raise
@@ -442,7 +482,16 @@ class CausalEngine:
                 log(f"[Engine] CUDA OOM -> batch size {bs}")
 
     @torch.inference_mode()
-    def _run_interventions(self, state, interventions, source, steer_z, steer_mlp, batch_size, steer_resid=None):
+    def _run_interventions(
+        self,
+        state,
+        interventions,
+        source,
+        steer_z,
+        steer_mlp,
+        batch_size,
+        steer_resid=None,
+    ):
         results = []
         H, d = self.num_heads, self.head_dim
         for start in range(0, len(interventions), batch_size):
@@ -491,7 +540,11 @@ class CausalEngine:
                         src = source.z[l].view(1, H, d).to(last.dtype)
                         last = torch.where(ph[:, :, None], src, last)
                     if do_s:
-                        dz = steer_z[l].view(1, H, d).to(device=last.device, dtype=torch.float32)
+                        dz = (
+                            steer_z[l]
+                            .view(1, H, d)
+                            .to(device=last.device, dtype=torch.float32)
+                        )
                         last = (last.float() + sh[:, :, None] * dz).to(x.dtype)
                     x[:, -1] = last
                     return (x.view(Bx, Sx, H * d),) + tuple(args[1:])
@@ -509,9 +562,13 @@ class CausalEngine:
                     o = (outp[0] if is_t else outp).clone()
                     last = o[:, -1]
                     if do_p:
-                        last = torch.where(pm[:, None], source.mlp[l][None].to(last.dtype), last)
+                        last = torch.where(
+                            pm[:, None], source.mlp[l][None].to(last.dtype), last
+                        )
                     if do_s:
-                        dm = steer_mlp[l][None].to(device=last.device, dtype=torch.float32)
+                        dm = steer_mlp[l][None].to(
+                            device=last.device, dtype=torch.float32
+                        )
                         last = (last.float() + sm[:, None] * dm).to(o.dtype)
                     o[:, -1] = last
                     return (o,) + tuple(outp[1:]) if is_t else o
@@ -528,9 +585,13 @@ class CausalEngine:
             try:
                 Sfull = state.prefix_len + 1
                 out = self.model(
-                    input_ids=torch.full((B, 1), state.last_token, dtype=torch.long, device=self.device),
+                    input_ids=torch.full(
+                        (B, 1), state.last_token, dtype=torch.long, device=self.device
+                    ),
                     past_key_values=self._expanded_cache(state.prefix_kv, B),
-                    attention_mask=torch.ones(B, Sfull, dtype=torch.long, device=self.device),
+                    attention_mask=torch.ones(
+                        B, Sfull, dtype=torch.long, device=self.device
+                    ),
                     cache_position=torch.tensor([state.prefix_len], device=self.device),
                     use_cache=True,
                 )
@@ -546,7 +607,9 @@ class CausalEngine:
     # Full-sequence reference (used only for verification)
     # ------------------------------------------------------------------
     @torch.inference_mode()
-    def _full_forward_with_last_patch(self, input_ids, cand_ids, source=None, patch=(), resid=None):
+    def _full_forward_with_last_patch(
+        self, input_ids, cand_ids, source=None, patch=(), resid=None
+    ):
         ids = torch.tensor([list(input_ids)], dtype=torch.long, device=self.device)
         H, d = self.num_heads, self.head_dim
         handles = []
@@ -556,7 +619,9 @@ class CausalEngine:
             def rh(mod, inp, outp):
                 is_t = isinstance(outp, tuple)
                 o = (outp[0] if is_t else outp).clone()
-                o[:, -1] = (o[:, -1].float() + ra * rv[rl].to(o.device).float()).to(o.dtype)
+                o[:, -1] = (o[:, -1].float() + ra * rv[rl].to(o.device).float()).to(
+                    o.dtype
+                )
                 return (o,) + tuple(outp[1:]) if is_t else o
 
             handles.append(self.layers[rl].register_forward_hook(rh))
@@ -564,17 +629,23 @@ class CausalEngine:
         for c in patch:
             l = int(self.space.layer_of(c))
             if self.space.is_mlp(c):
+
                 def f(mod, inp, outp, l=l):
                     o = (outp[0] if isinstance(outp, tuple) else outp).clone()
                     o[:, -1] = source.mlp[l].to(o.dtype)
                     return (o,) + tuple(outp[1:]) if isinstance(outp, tuple) else o
+
                 handles.append(self.mlps[l].register_forward_hook(f))
             else:
                 h = int(c % self.space.per_layer)
+
                 def g(mod, args, l=l, h=h):
                     x = args[0].clone()
-                    x[:, -1, h * d : (h + 1) * d] = source.z[l, h * d : (h + 1) * d].to(x.dtype)
+                    x[:, -1, h * d : (h + 1) * d] = source.z[l, h * d : (h + 1) * d].to(
+                        x.dtype
+                    )
                     return (x,) + tuple(args[1:])
+
                 handles.append(self.o_projs[l].register_forward_pre_hook(g))
         try:
             logits = self.model(input_ids=ids).logits[0, -1].float()
@@ -583,38 +654,61 @@ class CausalEngine:
                 h.remove()
         return logits[torch.tensor(list(cand_ids), device=self.device)].cpu().numpy()
 
-    def verify_cached_equivalence(self, corrupt_ids, clean_ids, cand_ids, tol: float = 0.5) -> Dict[str, float]:
+    def verify_cached_equivalence(
+        self, corrupt_ids, clean_ids, cand_ids, tol: float = 0.5
+    ) -> Dict[str, float]:
         """Cached single-token interventions must match full-sequence forwards."""
         sc = self.prepare(corrupt_ids, cand_ids)
         so = self.prepare(clean_ids, cand_ids)
         sp = self.space
         mid = self.num_layers // 2
-        comps = [sp.head(0, 0), sp.head(mid, self.num_heads - 1), sp.mlp(mid), sp.mlp(self.num_layers - 1)]
+        comps = [
+            sp.head(0, 0),
+            sp.head(mid, self.num_heads - 1),
+            sp.mlp(mid),
+            sp.mlp(self.num_layers - 1),
+        ]
         cached = self.run_interventions(
             sc, [Intervention(), Intervention(patch=np.array(comps))], source=so
         )
         ref_base = self._full_forward_with_last_patch(corrupt_ids, cand_ids)
-        ref_patch = self._full_forward_with_last_patch(corrupt_ids, cand_ids, source=so, patch=comps)
+        ref_patch = self._full_forward_with_last_patch(
+            corrupt_ids, cand_ids, source=so, patch=comps
+        )
         rv = (so.resid.float() - sc.resid.float()).cpu()
         cached_r = self.run_interventions(
-            sc, [Intervention(resid_layers=np.array([mid]), resid_alpha=1.0)], steer_resid=rv
+            sc,
+            [Intervention(resid_layers=np.array([mid]), resid_alpha=1.0)],
+            steer_resid=rv,
         )
-        ref_r = self._full_forward_with_last_patch(corrupt_ids, cand_ids, resid=(mid, 1.0, rv))
+        ref_r = self._full_forward_with_last_patch(
+            corrupt_ids, cand_ids, resid=(mid, 1.0, rv)
+        )
         res = {
             "base_max_abs_diff": float(np.abs(cached[0] - ref_base).max()),
             "patch_max_abs_diff": float(np.abs(cached[1] - ref_patch).max()),
             "resid_steer_max_abs_diff": float(np.abs(cached_r[0] - ref_r).max()),
-            "state_vs_full_max_abs_diff": float(np.abs(sc.cand_logits.numpy() - ref_base).max()),
+            "state_vs_full_max_abs_diff": float(
+                np.abs(sc.cand_logits.numpy() - ref_base).max()
+            ),
             "patch_effect_size": float(np.abs(ref_patch - ref_base).max()),
             "resid_steer_effect_size": float(np.abs(ref_r - ref_base).max()),
         }
-        worst = max(res["base_max_abs_diff"], res["patch_max_abs_diff"], res["resid_steer_max_abs_diff"],
-                    res["state_vs_full_max_abs_diff"])
+        worst = max(
+            res["base_max_abs_diff"],
+            res["patch_max_abs_diff"],
+            res["resid_steer_max_abs_diff"],
+            res["state_vs_full_max_abs_diff"],
+        )
         log(f"[Verify] cached-vs-full: {res}")
         if worst > 10 * tol:
-            raise RuntimeError(f"Cached intervention path disagrees with full forward: {res}")
+            raise RuntimeError(
+                f"Cached intervention path disagrees with full forward: {res}"
+            )
         if worst > tol:
-            warnings.warn(f"Cached path deviates by {worst:.3f} logits (numerical; tol={tol}).")
+            warnings.warn(
+                f"Cached path deviates by {worst:.3f} logits (numerical; tol={tol})."
+            )
         return res
 
     # ------------------------------------------------------------------
@@ -640,36 +734,50 @@ class CausalEngine:
         if resid_layers is not None and len(resid_layers) and resid_alpha != 0:
             rv = resid_vec.to(device=self.device, dtype=torch.float32)
             for rl in resid_layers:
+
                 def rh(mod, inp, outp, rl=int(rl)):
                     is_t = isinstance(outp, tuple)
                     o = (outp[0] if is_t else outp).clone()
                     o[:, -1] = (o[:, -1].float() + resid_alpha * rv[rl]).to(o.dtype)
                     return (o,) + tuple(outp[1:]) if is_t else o
+
                 handles.append(self.layers[int(rl)].register_forward_hook(rh))
         if steer is not None and len(steer) and alpha != 0:
             comps = np.asarray(steer)
             for l in sorted(set(self.space.layer_of(comps).tolist())):
                 in_l = comps[self.space.layer_of(comps) == l]
-                heads = [int(c % self.space.per_layer) for c in in_l if not self.space.is_mlp(c)]
+                heads = [
+                    int(c % self.space.per_layer)
+                    for c in in_l
+                    if not self.space.is_mlp(c)
+                ]
                 has_mlp = any(self.space.is_mlp(c) for c in in_l)
                 if heads:
                     mask = torch.zeros(H, device=self.device)
                     mask[heads] = alpha
+
                     def g(mod, args, l=l, mask=mask):
                         x = args[0].clone()
                         Bx, Sx, _ = x.shape
                         v = x.view(Bx, Sx, H, d)
-                        dz = steer_z[l].view(H, d).to(device=x.device, dtype=torch.float32)
+                        dz = (
+                            steer_z[l]
+                            .view(H, d)
+                            .to(device=x.device, dtype=torch.float32)
+                        )
                         v[:, -1] = (v[:, -1].float() + mask[:, None] * dz).to(x.dtype)
                         return (v.view(Bx, Sx, H * d),) + tuple(args[1:])
+
                     handles.append(self.o_projs[l].register_forward_pre_hook(g))
                 if has_mlp:
+
                     def f(mod, inp, outp, l=l):
                         is_t = isinstance(outp, tuple)
                         o = (outp[0] if is_t else outp).clone()
                         dm = steer_mlp[l].to(device=o.device, dtype=torch.float32)
                         o[:, -1] = (o[:, -1].float() + alpha * dm).to(o.dtype)
                         return (o,) + tuple(outp[1:]) if is_t else o
+
                     handles.append(self.mlps[l].register_forward_hook(f))
         try:
             ids = torch.tensor([list(input_ids)], dtype=torch.long, device=self.device)
@@ -678,7 +786,10 @@ class CausalEngine:
             generated: List[int] = []
             nxt = int(out.logits[0, -1].float().argmax().item())
             eos = set()
-            for tok in [self.tokenizer.eos_token_id, getattr(self.model.generation_config, "eos_token_id", None)]:
+            for tok in [
+                self.tokenizer.eos_token_id,
+                getattr(self.model.generation_config, "eos_token_id", None),
+            ]:
                 if isinstance(tok, int):
                     eos.add(tok)
                 elif isinstance(tok, (list, tuple)):
@@ -691,7 +802,9 @@ class CausalEngine:
                 out = self.model(
                     input_ids=torch.tensor([[nxt]], device=self.device),
                     past_key_values=past,
-                    attention_mask=torch.ones(1, pos + 1, dtype=torch.long, device=self.device),
+                    attention_mask=torch.ones(
+                        1, pos + 1, dtype=torch.long, device=self.device
+                    ),
                     cache_position=torch.tensor([pos], device=self.device),
                     use_cache=True,
                 )

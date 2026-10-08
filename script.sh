@@ -7,6 +7,9 @@
 
 set -uo pipefail   # no `set -e`: one failed model must not stop the others
 
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export TORCH_CUDNN_V8_API_ENABLED=1
+
 PROJECT_DIR="${PROJECT_DIR:-$HOME/projects/medhalt-main}"   # $HOME expands; "~" inside quotes does not
 SCRIPT="$PROJECT_DIR/run_casual_transfer.py"
 SCRATCH="${SCRATCH_DIR:-/scratch/adityasrikar.c/medhalt}"
@@ -51,7 +54,8 @@ COMMON_ARGS=(
   --num_random_controls 20
   --min_denom 1.0
   --min_margin 0.5
-  --batch_size 64
+  --batch_size 128
+  --attn_implementation flash_attention_2
   --bootstrap_samples 2000
   --permutations 10000
   --gen_max_samples 40

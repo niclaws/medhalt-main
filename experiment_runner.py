@@ -86,7 +86,9 @@ def prepare_pair(engine: CausalEngine, pair: Dict) -> Tuple[RunState, RunState]:
 # =====================================================================
 
 
-def base_pass(engine: CausalEngine, pairs: List[Dict], desc: str = "base") -> List[Dict]:
+def base_pass(
+    engine: CausalEngine, pairs: List[Dict], desc: str = "base"
+) -> List[Dict]:
     """For every candidate pair: clean/corrupt candidate logits, the
     hallucination candidate (chosen here when the task defines it via the
     model), logit differences, correctness and last-position residuals."""
@@ -137,7 +139,9 @@ def base_pass(engine: CausalEngine, pairs: List[Dict], desc: str = "base") -> Li
 # =====================================================================
 
 
-def compute_steering_vectors(engine: CausalEngine, pairs: List[Dict]) -> Dict[str, torch.Tensor]:
+def compute_steering_vectors(
+    engine: CausalEngine, pairs: List[Dict]
+) -> Dict[str, torch.Tensor]:
     """delta = mean over discovery pairs of (clean - corrupt) activation at the
     final position, per head-slice (o_proj input) and per MLP output."""
     sz = None
@@ -185,8 +189,12 @@ def discovery_sweep(
         lp = engine.run_interventions(sc, ivs_patch, source=so, batch_size=batch_size)
         E.append((logit_diff(lp, h) - d_corr) / denom)
         if with_steer:
-            ls = engine.run_interventions(sc, ivs_steer, steer_z=vz, steer_mlp=vm, batch_size=batch_size)
-            lo = engine.run_interventions(so, ivs_steer, steer_z=vz, steer_mlp=vm, batch_size=batch_size)
+            ls = engine.run_interventions(
+                sc, ivs_steer, steer_z=vz, steer_mlp=vm, batch_size=batch_size
+            )
+            lo = engine.run_interventions(
+                so, ivs_steer, steer_z=vz, steer_mlp=vm, batch_size=batch_size
+            )
             G.append((logit_diff(ls, h) - d_corr) / denom)
             Hm.append((d_clean - logit_diff(lo, h)) / denom)
         else:
@@ -199,7 +207,9 @@ def discovery_sweep(
     }
 
 
-def component_scores(disc: Dict[str, np.ndarray], base_correct_corrupt: np.ndarray) -> Dict[str, np.ndarray]:
+def component_scores(
+    disc: Dict[str, np.ndarray], base_correct_corrupt: np.ndarray
+) -> Dict[str, np.ndarray]:
     """Benefit/harm decomposition used by harm-aware selection."""
     e = disc["e_patch"]
     g = disc["gain"]
@@ -244,7 +254,9 @@ def contiguous_window(signal: np.ndarray, k: int) -> np.ndarray:
     return np.arange(start, start + k)
 
 
-def random_circuit(C: int, k: int, rng: np.random.Generator, exclude: Sequence[int]) -> np.ndarray:
+def random_circuit(
+    C: int, k: int, rng: np.random.Generator, exclude: Sequence[int]
+) -> np.ndarray:
     pool = np.setdiff1d(np.arange(C), np.asarray(exclude))
     if len(pool) < k:
         pool = np.arange(C)
@@ -264,7 +276,11 @@ def layer_matched_circuit(
         l = int(space.layer_of(c))
         if space.is_mlp(c):
             order = sorted(range(space.num_layers), key=lambda x: (abs(x - l), x))
-            cands = [space.mlp(x) for x in order if space.mlp(x) not in ref and space.mlp(x) not in used]
+            cands = [
+                space.mlp(x)
+                for x in order
+                if space.mlp(x) not in ref and space.mlp(x) not in used
+            ]
             if cands:
                 choice = cands[0]
                 exact += int(space.layer_of(choice) == l)
@@ -272,7 +288,9 @@ def layer_matched_circuit(
                 pool = [x for x in range(space.size) if x not in ref and x not in used]
                 choice = int(rng.choice(pool))
         else:
-            cands = [x for x in space.heads_in_layer(l) if x not in ref and x not in used]
+            cands = [
+                x for x in space.heads_in_layer(l) if x not in ref and x not in used
+            ]
             if cands:
                 choice = int(rng.choice(cands))
                 exact += 1
@@ -280,19 +298,27 @@ def layer_matched_circuit(
                 near = sorted(range(space.num_layers), key=lambda x: (abs(x - l), x))
                 choice = None
                 for x in near:
-                    cc = [y for y in space.heads_in_layer(x) if y not in ref and y not in used]
+                    cc = [
+                        y
+                        for y in space.heads_in_layer(x)
+                        if y not in ref and y not in used
+                    ]
                     if cc:
                         choice = int(rng.choice(cc))
                         break
                 if choice is None:
-                    pool = [x for x in range(space.size) if x not in ref and x not in used]
+                    pool = [
+                        x for x in range(space.size) if x not in ref and x not in used
+                    ]
                     choice = int(rng.choice(pool))
         out.append(int(choice))
         used.add(int(choice))
     return np.array(out), exact / max(len(reference), 1)
 
 
-def harm_aware_scores(scores: Dict[str, np.ndarray], regime: str, lam: float) -> np.ndarray:
+def harm_aware_scores(
+    scores: Dict[str, np.ndarray], regime: str, lam: float
+) -> np.ndarray:
     if regime == "patch":
         return scores["R_patch"] - lam * scores["H_patch"]
     return scores["R_steer"] - lam * scores["H_steer"]
@@ -336,8 +362,12 @@ def evaluate_circuits_on_pairs(
             ca_x[i] = is_correct(lx)
         else:
             ivs = [Intervention(steer=c, alpha=a) for c, a in zip(circuits, alphas)]
-            lx = engine.run_interventions(sc, ivs, steer_z=vz, steer_mlp=vm, batch_size=batch_size)
-            lo = engine.run_interventions(so, ivs, steer_z=vz, steer_mlp=vm, batch_size=batch_size)
+            lx = engine.run_interventions(
+                sc, ivs, steer_z=vz, steer_mlp=vm, batch_size=batch_size
+            )
+            lo = engine.run_interventions(
+                so, ivs, steer_z=vz, steer_mlp=vm, batch_size=batch_size
+            )
             gain[i] = (logit_diff(lx, h) - d_corr) / denom
             harm[i] = (d_clean - logit_diff(lo, h)) / denom
             ca_x[i] = is_correct(lx)
@@ -375,7 +405,11 @@ def calibrate_and_select(
     space = engine.space
     C = space.size
     rng = np.random.default_rng(seed)
-    sel: Dict = {"k_values": list(map(int, k_values)), "circuits": {}, "calibration": []}
+    sel: Dict = {
+        "k_values": list(map(int, k_values)),
+        "circuits": {},
+        "calibration": [],
+    }
 
     for k in k_values:
         top = topk(np.abs(scores["aie"]), k)
@@ -384,11 +418,22 @@ def calibrate_and_select(
 
         # ---- patch regime: lambda for harm-aware
         cands = [topk(harm_aware_scores(scores, "patch", lam), k) for lam in lambdas]
-        res = evaluate_circuits_on_pairs(engine, val_pairs, cands, "patch", [0.0] * len(cands), batch_size=batch_size)
+        res = evaluate_circuits_on_pairs(
+            engine, val_pairs, cands, "patch", [0.0] * len(cands), batch_size=batch_size
+        )
         obj = calibration_objective(res, "patch")
         best = int(np.nanargmax(obj))
         for lam, o in zip(lambdas, obj):
-            sel["calibration"].append({"k": k, "regime": "patch", "method": "harm_aware", "lambda": lam, "alpha": np.nan, "val_objective": float(o)})
+            sel["calibration"].append(
+                {
+                    "k": k,
+                    "regime": "patch",
+                    "method": "harm_aware",
+                    "lambda": lam,
+                    "alpha": np.nan,
+                    "val_objective": float(o),
+                }
+            )
         entry["patch"] = {
             "topk_aie": top,
             "contiguous": contig,
@@ -403,21 +448,52 @@ def calibrate_and_select(
         else:
             grid = [(lam, a) for lam in lambdas for a in alphas]
         if steer:
-            cands_s = [topk(harm_aware_scores(scores, "steer", lam), k) for lam, _ in grid]
+            cands_s = [
+                topk(harm_aware_scores(scores, "steer", lam), k) for lam, _ in grid
+            ]
             circ = cands_s + [top] * len(alphas) + [contig] * len(alphas)
             al = [a for _, a in grid] + list(alphas) + list(alphas)
-            res = evaluate_circuits_on_pairs(engine, val_pairs, circ, "steer", al, vectors, batch_size)
+            res = evaluate_circuits_on_pairs(
+                engine, val_pairs, circ, "steer", al, vectors, batch_size
+            )
             obj = calibration_objective(res, "steer")
             ng = len(grid)
             b_h = int(np.nanargmax(obj[:ng]))
             b_t = int(np.nanargmax(obj[ng : ng + len(alphas)]))
             b_c = int(np.nanargmax(obj[ng + len(alphas) :]))
             for (lam, a), o in zip(grid, obj[:ng]):
-                sel["calibration"].append({"k": k, "regime": "steer", "method": "harm_aware", "lambda": lam, "alpha": a, "val_objective": float(o)})
+                sel["calibration"].append(
+                    {
+                        "k": k,
+                        "regime": "steer",
+                        "method": "harm_aware",
+                        "lambda": lam,
+                        "alpha": a,
+                        "val_objective": float(o),
+                    }
+                )
             for a, o in zip(alphas, obj[ng : ng + len(alphas)]):
-                sel["calibration"].append({"k": k, "regime": "steer", "method": "topk_aie", "lambda": np.nan, "alpha": a, "val_objective": float(o)})
+                sel["calibration"].append(
+                    {
+                        "k": k,
+                        "regime": "steer",
+                        "method": "topk_aie",
+                        "lambda": np.nan,
+                        "alpha": a,
+                        "val_objective": float(o),
+                    }
+                )
             for a, o in zip(alphas, obj[ng + len(alphas) :]):
-                sel["calibration"].append({"k": k, "regime": "steer", "method": "contiguous", "lambda": np.nan, "alpha": a, "val_objective": float(o)})
+                sel["calibration"].append(
+                    {
+                        "k": k,
+                        "regime": "steer",
+                        "method": "contiguous",
+                        "lambda": np.nan,
+                        "alpha": a,
+                        "val_objective": float(o),
+                    }
+                )
             entry["steer"] = {
                 "topk_aie": top,
                 "contiguous": contig,
@@ -441,7 +517,9 @@ def calibrate_and_select(
             lm_exact.append(ex)
         entry["random"] = rand
         entry["layer_matched"] = lm
-        entry["layer_matched_exact_fraction"] = float(np.mean(lm_exact)) if lm_exact else np.nan
+        entry["layer_matched_exact_fraction"] = (
+            float(np.mean(lm_exact)) if lm_exact else np.nan
+        )
         sel["circuits"][int(k)] = entry
     return sel
 
@@ -458,9 +536,14 @@ def router_features(b: Dict, run_type: str) -> Dict:
     answer prefix), over the full vocabulary, so they need no candidate set.
     cand_logits are kept only for the 'candidate' comparison mode."""
     return {
-        "vocab_stats": np.asarray(b.get(f"vocab_prompt_{run_type}", b[f"vocab_{run_type}"]), dtype=np.float64),
-        "resid": (b.get(f"resid_prompt_{run_type}") if b.get(f"resid_prompt_{run_type}") is not None
-                  else b[f"resid_{run_type}"]).float(),
+        "vocab_stats": np.asarray(
+            b.get(f"vocab_prompt_{run_type}", b[f"vocab_{run_type}"]), dtype=np.float64
+        ),
+        "resid": (
+            b.get(f"resid_prompt_{run_type}")
+            if b.get(f"resid_prompt_{run_type}") is not None
+            else b[f"resid_{run_type}"]
+        ).float(),
         "cand_logits": np.asarray(b[f"{run_type}_logits"], dtype=np.float64),
     }
 
@@ -479,7 +562,13 @@ class RiskRouter:
         inference time.
     Steering is applied iff predicted risk > tau."""
 
-    def __init__(self, layers: Sequence[int], n_pca: int = 4, l2: float = 1.0, mode: str = "vocab"):
+    def __init__(
+        self,
+        layers: Sequence[int],
+        n_pca: int = 4,
+        l2: float = 1.0,
+        mode: str = "vocab",
+    ):
         if mode not in ("vocab", "candidate"):
             raise ValueError(mode)
         self.layers = list(layers)
@@ -504,7 +593,9 @@ class RiskRouter:
             if self.mode == "candidate":
                 parts.append(self._cand_feats(f["cand_logits"]))
             for j, l in enumerate(self.layers):
-                parts.append((f["resid"][l].double().numpy() - self.mu[j]) @ self.pcs[j])
+                parts.append(
+                    (f["resid"][l].double().numpy() - self.mu[j]) @ self.pcs[j]
+                )
             rows.append(np.concatenate(parts))
         return np.stack(rows)
 
@@ -528,7 +619,9 @@ class RiskRouter:
         def closure():
             opt.zero_grad()
             z = X @ w + b
-            loss = torch.nn.functional.binary_cross_entropy_with_logits(z, y) + self.l2 * (w**2).sum() / len(y)
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                z, y
+            ) + self.l2 * (w**2).sum() / len(y)
             loss.backward()
             return loss
 
@@ -558,7 +651,22 @@ class RiskRouter:
         return best_tau
 
     def state_dict(self):
-        return {k: getattr(self, k) for k in ["layers", "n_pca", "l2", "mode", "tau", "mu", "pcs", "fm", "fs", "w", "b"]}
+        return {
+            k: getattr(self, k)
+            for k in [
+                "layers",
+                "n_pca",
+                "l2",
+                "mode",
+                "tau",
+                "mu",
+                "pcs",
+                "fm",
+                "fs",
+                "w",
+                "b",
+            ]
+        }
 
     @classmethod
     def from_state(cls, d):
@@ -589,7 +697,9 @@ def fit_router(
         for kind in ("clean", "corrupt"):
             feats.append(router_features(b, kind))
             wrong.append(not b[f"correct_{kind}"])
-    base_router = RiskRouter(default_router_layers(engine.num_layers), mode=mode).fit(feats, np.array(wrong))
+    base_router = RiskRouter(default_router_layers(engine.num_layers), mode=mode).fit(
+        feats, np.array(wrong)
+    )
 
     # validation runs: features + steered outcome for each k's harm-aware circuit
     vz, vm = _vec_to_device(vectors, engine)
@@ -598,10 +708,18 @@ def fit_router(
     after = {k: [] for k in ks}
     for p, b in zip(val_pairs, val_base):
         sc, so = prepare_pair(engine, p)
-        ivs = [Intervention(steer=sel["circuits"][k]["steer"]["harm_aware"], alpha=sel["circuits"][k]["steer"]["alpha"]["harm_aware"]) for k in ks]
+        ivs = [
+            Intervention(
+                steer=sel["circuits"][k]["steer"]["harm_aware"],
+                alpha=sel["circuits"][k]["steer"]["alpha"]["harm_aware"],
+            )
+            for k in ks
+        ]
         for st, rt in ((so, "clean"), (sc, "corrupt")):
             gold = run_gold(p, rt)
-            lg = engine.run_interventions(st, ivs, steer_z=vz, steer_mlp=vm, batch_size=batch_size)
+            lg = engine.run_interventions(
+                st, ivs, steer_z=vz, steer_mlp=vm, batch_size=batch_size
+            )
             vfeats.append(router_features(b, rt))
             before.append(bool(st.cand_logits.numpy().argmax() == gold))
             for j, k in enumerate(ks):
@@ -613,10 +731,19 @@ def fit_router(
         delta = np.array(after[k], dtype=float) - np.array(before, dtype=float)
         tau = r.choose_tau(risk, delta) if len(delta) else 1.0
         routers[int(k)] = r.state_dict()
-        rows.append({"k": k, "router_mode": mode, "tau": tau, "val_runs": len(delta),
-                     "val_net_gain_if_always": float(delta.sum()) if len(delta) else np.nan,
-                     "val_net_gain_routed": float(delta[risk > tau].sum()) if len(delta) else np.nan,
-                     "val_route_rate": float((risk > tau).mean()) if len(delta) else np.nan})
+        rows.append(
+            {
+                "k": k,
+                "router_mode": mode,
+                "tau": tau,
+                "val_runs": len(delta),
+                "val_net_gain_if_always": float(delta.sum()) if len(delta) else np.nan,
+                "val_net_gain_routed": (
+                    float(delta[risk > tau].sum()) if len(delta) else np.nan
+                ),
+                "val_route_rate": float((risk > tau).mean()) if len(delta) else np.nan,
+            }
+        )
     return routers, rows
 
 
@@ -662,7 +789,10 @@ def evaluate_target(
             "pair_type": p["pair_type"],
             "denom": denom,
             # a real hallucination: hallucination-type pair whose corrupt run is wrong
-            "hallucinated": bool(p["pair_type"] == "hallucination" and base["corrupt"].argmax() != gold["corrupt"]),
+            "hallucinated": bool(
+                p["pair_type"] == "hallucination"
+                and base["corrupt"].argmax() != gold["corrupt"]
+            ),
         }
 
         def add(src, regime, method, k, rep, run_type, logits_row):
@@ -670,19 +800,26 @@ def evaluate_target(
             g = gold[run_type]
             d_b = float(b[0] - b[h])
             d_a = float(logits_row[0] - logits_row[h])
-            rows.append({
-                **common,
-                "source_task": src, "regime": regime, "method": method, "k": k, "rep": rep,
-                "run_type": run_type,
-                "d_base": d_b, "d_after": d_a,
-                "norm_gain": (d_a - d_b) / denom,
-                "correct_base": bool(b.argmax() == g),
-                "correct_after": bool(np.argmax(logits_row) == g),
-                "halluc_pick_base": bool(b.argmax() == h),
-                "halluc_pick_after": bool(np.argmax(logits_row) == h),
-                # patch regime on counterfactual pairs: did the clean run's answer transfer?
-                "flip_to_clean": bool(np.argmax(logits_row) == 0),
-            })
+            rows.append(
+                {
+                    **common,
+                    "source_task": src,
+                    "regime": regime,
+                    "method": method,
+                    "k": k,
+                    "rep": rep,
+                    "run_type": run_type,
+                    "d_base": d_b,
+                    "d_after": d_a,
+                    "norm_gain": (d_a - d_b) / denom,
+                    "correct_base": bool(b.argmax() == g),
+                    "correct_after": bool(np.argmax(logits_row) == g),
+                    "halluc_pick_base": bool(b.argmax() == h),
+                    "halluc_pick_after": bool(np.argmax(logits_row) == h),
+                    # patch regime on counterfactual pairs: did the clean run's answer transfer?
+                    "flip_to_clean": bool(np.argmax(logits_row) == 0),
+                }
+            )
 
         # ---- none
         for rt in ("corrupt", "clean"):
@@ -693,28 +830,44 @@ def evaluate_target(
         for s, S in sources.items():
             for k, ent in S["sel"]["circuits"].items():
                 for m in DET_METHODS:
-                    p_ivs.append(Intervention(patch=ent["patch"][m])); p_tags.append((s, m, k, -1))
+                    p_ivs.append(Intervention(patch=ent["patch"][m]))
+                    p_tags.append((s, m, k, -1))
                 for m in RAND_METHODS:
                     for r, c in enumerate(ent[m]):
-                        p_ivs.append(Intervention(patch=c)); p_tags.append((s, m, k, r))
+                        p_ivs.append(Intervention(patch=c))
+                        p_tags.append((s, m, k, r))
             # per-layer: source's top-m heads (by |AIE|) inside each layer
             aie = S["scores"]["aie"]
             for l in range(L):
                 hs = space.heads_in_layer(l)
                 pick = hs[np.argsort(-np.abs(aie[hs]))[:layer_top_m]]
-                p_ivs.append(Intervention(patch=pick)); p_tags.append((s, "layer_topm", l, -2))
+                p_ivs.append(Intervention(patch=pick))
+                p_tags.append((s, "layer_topm", l, -2))
         # source-independent per-layer: whole attention layer / MLP
         for l in range(L):
-            p_ivs.append(Intervention(patch=space.heads_in_layer(l))); p_tags.append(("*", "layer_all_heads", l, -2))
-            p_ivs.append(Intervention(patch=np.array([space.mlp(l)]))); p_tags.append(("*", "layer_mlp", l, -2))
+            p_ivs.append(Intervention(patch=space.heads_in_layer(l)))
+            p_tags.append(("*", "layer_all_heads", l, -2))
+            p_ivs.append(Intervention(patch=np.array([space.mlp(l)])))
+            p_tags.append(("*", "layer_mlp", l, -2))
         lp = engine.run_interventions(sc, p_ivs, source=so, batch_size=batch_size)
         for (s, m, k, r), lg in zip(p_tags, lp):
             if r == -2:
-                lrows.append({**common, "source_task": s, "regime": "patch", "probe": m, "layer": k, "run_type": "corrupt",
-                              "norm_gain": (float(lg[0] - lg[h]) - d_corr) / denom,
-                              "correct_base": bool(base["corrupt"].argmax() == gold["corrupt"]),
-                              "correct_after": bool(np.argmax(lg) == gold["corrupt"]),
-                              "flip_to_clean": bool(np.argmax(lg) == 0)})
+                lrows.append(
+                    {
+                        **common,
+                        "source_task": s,
+                        "regime": "patch",
+                        "probe": m,
+                        "layer": k,
+                        "run_type": "corrupt",
+                        "norm_gain": (float(lg[0] - lg[h]) - d_corr) / denom,
+                        "correct_base": bool(
+                            base["corrupt"].argmax() == gold["corrupt"]
+                        ),
+                        "correct_after": bool(np.argmax(lg) == gold["corrupt"]),
+                        "flip_to_clean": bool(np.argmax(lg) == 0),
+                    }
+                )
             else:
                 add(s, "patch", m, k, r, "corrupt", lg)
 
@@ -727,27 +880,43 @@ def evaluate_target(
             for k, ent in S["sel"]["circuits"].items():
                 al = ent["steer"]["alpha"]
                 for m in DET_METHODS:
-                    s_ivs.append(Intervention(steer=ent["steer"][m], alpha=al[m])); s_tags.append((m, k, -1))
+                    s_ivs.append(Intervention(steer=ent["steer"][m], alpha=al[m]))
+                    s_tags.append((m, k, -1))
                 for m in RAND_METHODS:
                     for r, c in enumerate(ent[m]):
-                        s_ivs.append(Intervention(steer=c, alpha=al[m])); s_tags.append((m, k, r))
+                        s_ivs.append(Intervention(steer=c, alpha=al[m]))
+                        s_tags.append((m, k, r))
             aie = S["scores"]["aie"]
-            a_layer = S["sel"]["circuits"][max(S["sel"]["circuits"])]["steer"]["alpha"]["topk_aie"]
+            a_layer = S["sel"]["circuits"][max(S["sel"]["circuits"])]["steer"]["alpha"][
+                "topk_aie"
+            ]
             for l in range(L):
                 hs = space.heads_in_layer(l)
                 pick = hs[np.argsort(-np.abs(aie[hs]))[:layer_top_m]]
-                s_ivs.append(Intervention(steer=pick, alpha=a_layer)); s_tags.append(("layer_topm", l, -2))
+                s_ivs.append(Intervention(steer=pick, alpha=a_layer))
+                s_tags.append(("layer_topm", l, -2))
             for rt, st in (("corrupt", sc), ("clean", so)):
-                lg_all = engine.run_interventions(st, s_ivs, steer_z=vz, steer_mlp=vm, batch_size=batch_size)
+                lg_all = engine.run_interventions(
+                    st, s_ivs, steer_z=vz, steer_mlp=vm, batch_size=batch_size
+                )
                 harm_rows = {}
                 for (m, k, r), lg in zip(s_tags, lg_all):
                     if r == -2:
                         d_b = float(base[rt][0] - base[rt][h])
-                        lrows.append({**common, "source_task": s, "regime": "steer", "probe": m, "layer": k, "run_type": rt,
-                                      "norm_gain": (float(lg[0] - lg[h]) - d_b) / denom,
-                                      "correct_base": bool(base[rt].argmax() == gold[rt]),
-                                      "correct_after": bool(np.argmax(lg) == gold[rt]),
-                                      "flip_to_clean": bool(np.argmax(lg) == 0)})
+                        lrows.append(
+                            {
+                                **common,
+                                "source_task": s,
+                                "regime": "steer",
+                                "probe": m,
+                                "layer": k,
+                                "run_type": rt,
+                                "norm_gain": (float(lg[0] - lg[h]) - d_b) / denom,
+                                "correct_base": bool(base[rt].argmax() == gold[rt]),
+                                "correct_after": bool(np.argmax(lg) == gold[rt]),
+                                "flip_to_clean": bool(np.argmax(lg) == 0),
+                            }
+                        )
                         continue
                     add(s, "steer", m, k, r, rt, lg)
                     if m == "harm_aware":
@@ -775,7 +944,9 @@ def steering_outcomes(
     normalisation), for evaluation sets where the clean run need not be
     correct (the unfiltered held-out set).  Same columns as evaluate_target."""
     rows = []
-    for p, bentry in tqdm(list(zip(pairs, base_entries)), desc=f"steer-unfiltered[{target}]", leave=False):
+    for p, bentry in tqdm(
+        list(zip(pairs, base_entries)), desc=f"steer-unfiltered[{target}]", leave=False
+    ):
         h = p["halluc_idx"]
         sc, so = prepare_pair(engine, p)
         for s, S in sources.items():
@@ -791,20 +962,53 @@ def steering_outcomes(
             for rt, st in (("clean", so), ("corrupt", sc)):
                 g = run_gold(p, rt)
                 b = st.cand_logits.numpy()
-                lg_all = engine.run_interventions(st, ivs, steer_z=vz, steer_mlp=vm, batch_size=batch_size)
-                common = {"source_task": s, "target_task": target, "regime": "steer", "rep": -1, "sample_id": p["sample_id"],
-                          "pair_type": p["pair_type"], "run_type": rt, "correct_base": bool(b.argmax() == g),
-                          "halluc_pick_base": bool(b.argmax() == h)}
+                lg_all = engine.run_interventions(
+                    st, ivs, steer_z=vz, steer_mlp=vm, batch_size=batch_size
+                )
+                common = {
+                    "source_task": s,
+                    "target_task": target,
+                    "regime": "steer",
+                    "rep": -1,
+                    "sample_id": p["sample_id"],
+                    "pair_type": p["pair_type"],
+                    "run_type": rt,
+                    "correct_base": bool(b.argmax() == g),
+                    "halluc_pick_base": bool(b.argmax() == h),
+                }
                 for (m, k), lg in zip(tags, lg_all):
-                    rows.append({**common, "method": m, "k": k, "correct_after": bool(lg.argmax() == g),
-                                 "halluc_pick_after": bool(lg.argmax() == h)})
+                    rows.append(
+                        {
+                            **common,
+                            "method": m,
+                            "k": k,
+                            "correct_after": bool(lg.argmax() == g),
+                            "halluc_pick_after": bool(lg.argmax() == h),
+                        }
+                    )
                     if m == "harm_aware" and k in S["routers"]:
                         router = RiskRouter.from_state(S["routers"][k])
                         risk = float(router.predict([router_features(bentry, rt)])[0])
                         use = risk > router.tau
-                        rows.append({**common, "method": "harm_routing", "k": k, "routed": bool(use), "risk": risk,
-                                     "correct_after": bool(lg.argmax() == g) if use else bool(b.argmax() == g),
-                                     "halluc_pick_after": bool(lg.argmax() == h) if use else bool(b.argmax() == h)})
+                        rows.append(
+                            {
+                                **common,
+                                "method": "harm_routing",
+                                "k": k,
+                                "routed": bool(use),
+                                "risk": risk,
+                                "correct_after": (
+                                    bool(lg.argmax() == g)
+                                    if use
+                                    else bool(b.argmax() == g)
+                                ),
+                                "halluc_pick_after": (
+                                    bool(lg.argmax() == h)
+                                    if use
+                                    else bool(b.argmax() == h)
+                                ),
+                            }
+                        )
     return pd.DataFrame(rows)
 
 
@@ -832,7 +1036,13 @@ def steering_outcomes(
 # ---------------------------------------------------------------------
 
 ABSTAIN_RE = r"(i'?m not sure|not sure|i don'?t know|do not know|i cannot|i can'?t|unable to|not aware|no such|insufficient information|cannot be determined)"
-INCORRECT_LABELS = {"wrong_option", "wrong_pmid_known", "wrong_pmid_unverified", "other_paper_title", "unmatched_title"}
+INCORRECT_LABELS = {
+    "wrong_option",
+    "wrong_pmid_known",
+    "wrong_pmid_unverified",
+    "other_paper_title",
+    "unmatched_title",
+}
 UNVERIFIABLE_LABELS = {"wrong_pmid_unverified", "unmatched_title"}
 
 
@@ -852,28 +1062,53 @@ def _f1(a: set, b: set) -> float:
     return 2 * p * r / (p + r)
 
 
-def classify_generation(text: str, pair: Dict, run_type: str = "clean", ref: Optional[Dict] = None,
-                        strict_f1: float = 0.8) -> Dict:
+def classify_generation(
+    text: str,
+    pair: Dict,
+    run_type: str = "clean",
+    ref: Optional[Dict] = None,
+    strict_f1: float = 0.8,
+) -> Dict:
     """Returns {"label", "picked_distractor", "f1_gold", "f1_best_other", "matched_ref"}.
     ref = {"pmid2title": {pmid: title}, "title_tokens": [(pmid, tokenset), ...]}."""
     import re
 
     t = text.strip()
-    out = {"label": "unparsable", "picked_distractor": None, "f1_gold": np.nan, "f1_best_other": np.nan, "matched_ref": None}
+    out = {
+        "label": "unparsable",
+        "picked_distractor": None,
+        "f1_gold": np.nan,
+        "f1_best_other": np.nan,
+        "matched_ref": None,
+    }
     kind = pair["answer_kind"]
-    gold = pair["gold"] if run_type == "clean" else pair.get("gold_corrupt_str", pair["gold"])
+    gold = (
+        pair["gold"]
+        if run_type == "clean"
+        else pair.get("gold_corrupt_str", pair["gold"])
+    )
     abstains = bool(re.search(ABSTAIN_RE, t[:80], flags=re.I))
     if kind == "letter":
         # an option letter followed by ) . : , or the end (not the article "A patient ...")
-        m = (re.match(r"\s*[\(\[]?([A-E])(?:[\)\].:,]|\s*$)", t)
-             or re.search(r"(?:answer|option)\s*(?:is|:)?\s*[\(\[]?([A-E])\b", t, flags=re.I)
-             or re.search(r"\b([A-E])\)", t))
+        m = (
+            re.match(r"\s*[\(\[]?([A-E])(?:[\)\].:,]|\s*$)", t)
+            or re.search(
+                r"(?:answer|option)\s*(?:is|:)?\s*[\(\[]?([A-E])\b", t, flags=re.I
+            )
+            or re.search(r"\b([A-E])\)", t)
+        )
         letter = m.group(1) if m else None
         if letter is None:
             # the model may restate an option's text instead of its letter
-            opts = re.findall(r"^([A-E])\) (.+)$", pair.get(f"{run_type}_user", ""), flags=re.M)
+            opts = re.findall(
+                r"^([A-E])\) (.+)$", pair.get(f"{run_type}_user", ""), flags=re.M
+            )
             low = t.lower()
-            hits = [l for l, o in opts if len(o.strip()) >= 3 and low.startswith(o.strip().lower()[:40])]
+            hits = [
+                l
+                for l, o in opts
+                if len(o.strip()) >= 3 and low.startswith(o.strip().lower()[:40])
+            ]
             letter = hits[0] if len(hits) == 1 else None
         if letter is None:
             out["label"] = "abstain" if abstains else "unparsable"
@@ -942,8 +1177,20 @@ def audit_sheet(gen: pd.DataFrame, n_per_cell: int, seed: int) -> pd.DataFrame:
     s.insert(0, "audit_id", np.arange(len(s)))
     s["human_label"] = ""
     s["human_notes"] = ""
-    cols = ["audit_id", "target_task", "method", "protocol", "run_type", "sample_id", "prompt_question", "reference_answer",
-            "text", "label", "human_label", "human_notes"]
+    cols = [
+        "audit_id",
+        "target_task",
+        "method",
+        "protocol",
+        "run_type",
+        "sample_id",
+        "prompt_question",
+        "reference_answer",
+        "text",
+        "label",
+        "human_label",
+        "human_notes",
+    ]
     return s[[c for c in cols if c in s.columns]]
 
 
@@ -971,11 +1218,22 @@ def audit_agreement(sheet: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         po = float((g.auto == g.human).mean())
         pe = float(sum((g.auto == c).mean() * (g.human == c).mean() for c in cats))
         inc = g[g.auto == "incorrect"]
-        rows.append({"target_task": key, "n": len(g), "raw_agreement": po,
-                     "cohen_kappa": (po - pe) / (1 - pe) if pe < 1 else np.nan,
-                     "precision_auto_incorrect": float((inc.human == "incorrect").mean()) if len(inc) else np.nan,
-                     "recall_human_incorrect": float((g[g.human == "incorrect"].auto == "incorrect").mean())
-                     if (g.human == "incorrect").any() else np.nan})
+        rows.append(
+            {
+                "target_task": key,
+                "n": len(g),
+                "raw_agreement": po,
+                "cohen_kappa": (po - pe) / (1 - pe) if pe < 1 else np.nan,
+                "precision_auto_incorrect": (
+                    float((inc.human == "incorrect").mean()) if len(inc) else np.nan
+                ),
+                "recall_human_incorrect": (
+                    float((g[g.human == "incorrect"].auto == "incorrect").mean())
+                    if (g.human == "incorrect").any()
+                    else np.nan
+                ),
+            }
+        )
     conf = pd.crosstab(s.auto, s.human).reset_index()
     return pd.DataFrame(rows), conf
 
@@ -985,7 +1243,9 @@ def audit_agreement(sheet: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
 # =====================================================================
 
 
-def representation_analysis(base_by_task: Dict[str, List[Dict]], num_layers: int, seed: int = 0):
+def representation_analysis(
+    base_by_task: Dict[str, List[Dict]], num_layers: int, seed: int = 0
+):
     """(a) per task, per layer: paired linear CKA between clean and corrupt
     residuals of the SAME samples (how much the corruption reshapes geometry);
     (b) across tasks, per layer: cosine between mean (clean - corrupt) residual
@@ -1001,9 +1261,15 @@ def representation_analysis(base_by_task: Dict[str, List[Dict]], num_layers: int
         D = Xc - Xx
         deltas[t] = D
         for l in range(num_layers):
-            cka_rows.append({"task": t, "layer": l, "n": len(base),
-                             "paired_cka_debiased": paired_linear_cka(Xc[:, l], Xx[:, l], True),
-                             "paired_cka_biased": paired_linear_cka(Xc[:, l], Xx[:, l], False)})
+            cka_rows.append(
+                {
+                    "task": t,
+                    "layer": l,
+                    "n": len(base),
+                    "paired_cka_debiased": paired_linear_cka(Xc[:, l], Xx[:, l], True),
+                    "paired_cka_biased": paired_linear_cka(Xc[:, l], Xx[:, l], False),
+                }
+            )
     tasks = list(deltas)
     for i, a in enumerate(tasks):
         for b in tasks[i:]:
@@ -1017,7 +1283,15 @@ def representation_analysis(base_by_task: Dict[str, List[Dict]], num_layers: int
                 else:
                     val = cosine(deltas[a][:, l].mean(0), deltas[b][:, l].mean(0))
                     kind = "cross_task"
-                dir_rows.append({"task_a": a, "task_b": b, "layer": l, "kind": kind, "direction_cosine": val})
+                dir_rows.append(
+                    {
+                        "task_a": a,
+                        "task_b": b,
+                        "layer": l,
+                        "kind": kind,
+                        "direction_cosine": val,
+                    }
+                )
     return pd.DataFrame(cka_rows), pd.DataFrame(dir_rows)
 
 
@@ -1026,7 +1300,9 @@ def representation_analysis(base_by_task: Dict[str, List[Dict]], num_layers: int
 # =====================================================================
 
 
-def bootstrap_ci(x: np.ndarray, n_boot: int, seed: int, conf: float = 0.95) -> Tuple[float, float]:
+def bootstrap_ci(
+    x: np.ndarray, n_boot: int, seed: int, conf: float = 0.95
+) -> Tuple[float, float]:
     x = np.asarray(x, dtype=float)
     x = x[np.isfinite(x)]
     if len(x) < 2 or n_boot <= 0:
@@ -1066,7 +1342,15 @@ def holm(pvals: Sequence[float]) -> List[float]:
 def per_sample_table(df: pd.DataFrame) -> pd.DataFrame:
     """Collapse random replicates to per-sample means; one row per
     (source, target, regime, method, k, sample, run_type)."""
-    keys = ["source_task", "target_task", "regime", "method", "k", "sample_id", "run_type"]
+    keys = [
+        "source_task",
+        "target_task",
+        "regime",
+        "method",
+        "k",
+        "sample_id",
+        "run_type",
+    ]
     agg = df.groupby(keys, as_index=False).agg(
         norm_gain=("norm_gain", "mean"),
         correct_after=("correct_after", "mean"),
@@ -1080,7 +1364,9 @@ def per_sample_table(df: pd.DataFrame) -> pd.DataFrame:
     return agg
 
 
-def summarize(df: pd.DataFrame, n_boot: int, n_perm: int, seed: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def summarize(
+    df: pd.DataFrame, n_boot: int, n_perm: int, seed: int
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Returns (summary, paired_tests, random_control_tests)."""
     ps = per_sample_table(df[df["method"] != "none"])
     summ = []
@@ -1093,26 +1379,43 @@ def summarize(df: pd.DataFrame, n_boot: int, n_perm: int, seed: int) -> Tuple[pd
         ok_c = gc[gc.correct_base]
         lo, hi = bootstrap_ci(gx.norm_gain.values, n_boot, seed)
         row = {
-            "source_task": s, "target_task": t, "regime": rg, "method": m, "k": k,
+            "source_task": s,
+            "target_task": t,
+            "regime": rg,
+            "method": m,
+            "k": k,
             "pair_type": gx.pair_type.iloc[0] if len(gx) else None,
             "n_test": len(gx),
-            "mean_norm_gain": gx.norm_gain.mean(), "median_norm_gain": gx.norm_gain.median(),
-            "gain_ci_low": lo, "gain_ci_high": hi,
-            "acc_corrupt_base": gx.correct_base.mean(), "acc_corrupt_after": gx.correct_after.mean(),
+            "mean_norm_gain": gx.norm_gain.mean(),
+            "median_norm_gain": gx.norm_gain.median(),
+            "gain_ci_low": lo,
+            "gain_ci_high": hi,
+            "acc_corrupt_base": gx.correct_base.mean(),
+            "acc_corrupt_after": gx.correct_after.mean(),
             "n_hallucinated": len(hallu),
             "rescue_rate": hallu.correct_after.mean() if len(hallu) else np.nan,
-            "induction_rate_corrupt": (1 - ok_x.correct_after).mean() if len(ok_x) else np.nan,
-            "mean_norm_gain_hallucinated": hallu.norm_gain.mean() if len(hallu) else np.nan,
-            "halluc_pick_corrupt_base": gx.halluc_pick_base.mean(), "halluc_pick_corrupt_after": gx.halluc_pick_after.mean(),
+            "induction_rate_corrupt": (
+                (1 - ok_x.correct_after).mean() if len(ok_x) else np.nan
+            ),
+            "mean_norm_gain_hallucinated": (
+                hallu.norm_gain.mean() if len(hallu) else np.nan
+            ),
+            "halluc_pick_corrupt_base": gx.halluc_pick_base.mean(),
+            "halluc_pick_corrupt_after": gx.halluc_pick_after.mean(),
             # patch regime on counterfactual pairs this is the identity-transfer rate
             "flip_to_clean_rate_corrupt": gx.flip_to_clean.mean(),
         }
         if len(gc):
-            row.update({
-                "acc_clean_base": gc.correct_base.mean(), "acc_clean_after": gc.correct_after.mean(),
-                "induction_rate_clean": (1 - ok_c.correct_after).mean() if len(ok_c) else np.nan,
-                "mean_norm_harm_clean": -gc.norm_gain.mean(),
-            })
+            row.update(
+                {
+                    "acc_clean_base": gc.correct_base.mean(),
+                    "acc_clean_after": gc.correct_after.mean(),
+                    "induction_rate_clean": (
+                        (1 - ok_c.correct_after).mean() if len(ok_c) else np.nan
+                    ),
+                    "mean_norm_harm_clean": -gc.norm_gain.mean(),
+                }
+            )
         summ.append(row)
     summary = pd.DataFrame(summ)
 
@@ -1122,8 +1425,12 @@ def summarize(df: pd.DataFrame, n_boot: int, n_perm: int, seed: int) -> Tuple[pd
         # per-sample net correctness change (corrupt + clean runs averaged)
         g = g.copy()
         g["delta_correct"] = g.correct_after - g.correct_base.astype(float)
-        piv_acc = g.pivot_table(index="sample_id", columns="method", values="delta_correct", aggfunc="mean")
-        piv_gain = g[g.run_type == "corrupt"].pivot_table(index="sample_id", columns="method", values="norm_gain", aggfunc="mean")
+        piv_acc = g.pivot_table(
+            index="sample_id", columns="method", values="delta_correct", aggfunc="mean"
+        )
+        piv_gain = g[g.run_type == "corrupt"].pivot_table(
+            index="sample_id", columns="method", values="norm_gain", aggfunc="mean"
+        )
         fam = []
         for metric, piv in (("delta_correct", piv_acc), ("norm_gain", piv_gain)):
             for m in piv.columns:
@@ -1135,9 +1442,22 @@ def summarize(df: pd.DataFrame, n_boot: int, n_perm: int, seed: int) -> Tuple[pd
                     d = a - b
                     d = d[np.isfinite(d)]
                     lo, hi = bootstrap_ci(d, n_boot, seed)
-                    fam.append({"source_task": s, "target_task": t, "regime": rg, "k": k, "metric": metric,
-                                "method": m, "reference": ref, "n": len(d), "mean_diff": float(d.mean()) if len(d) else np.nan,
-                                "ci_low": lo, "ci_high": hi, "p_signflip": sign_flip_p(d, n_perm, seed)})
+                    fam.append(
+                        {
+                            "source_task": s,
+                            "target_task": t,
+                            "regime": rg,
+                            "k": k,
+                            "metric": metric,
+                            "method": m,
+                            "reference": ref,
+                            "n": len(d),
+                            "mean_diff": float(d.mean()) if len(d) else np.nan,
+                            "ci_low": lo,
+                            "ci_high": hi,
+                            "p_signflip": sign_flip_p(d, n_perm, seed),
+                        }
+                    )
         if fam:
             adj = holm([f["p_signflip"] for f in fam])
             for f, a in zip(fam, adj):
@@ -1148,18 +1468,40 @@ def summarize(df: pd.DataFrame, n_boot: int, n_perm: int, seed: int) -> Tuple[pd
     # ---- empirical p-values of deterministic circuits vs random replicates
     ctl = []
     xr = df[(df.method.isin(RAND_METHODS)) & (df.run_type == "corrupt")]
-    rep_means = xr.groupby(["source_task", "target_task", "regime", "method", "k", "rep"]).norm_gain.mean().reset_index()
+    rep_means = (
+        xr.groupby(["source_task", "target_task", "regime", "method", "k", "rep"])
+        .norm_gain.mean()
+        .reset_index()
+    )
     obs = summary[summary.method.isin(["topk_aie", "harm_aware"])]
     for _, o in obs.iterrows():
         for cm in RAND_METHODS:
-            r = rep_means[(rep_means.source_task == o.source_task) & (rep_means.target_task == o.target_task)
-                          & (rep_means.regime == o.regime) & (rep_means.method == cm) & (rep_means.k == o.k)].norm_gain.values
+            r = rep_means[
+                (rep_means.source_task == o.source_task)
+                & (rep_means.target_task == o.target_task)
+                & (rep_means.regime == o.regime)
+                & (rep_means.method == cm)
+                & (rep_means.k == o.k)
+            ].norm_gain.values
             if len(r) == 0:
                 continue
-            ctl.append({"source_task": o.source_task, "target_task": o.target_task, "regime": o.regime, "k": o.k,
-                        "observed_method": o.method, "control": cm, "observed_mean": o.mean_norm_gain,
-                        "control_mean": float(r.mean()), "control_sd": float(r.std(ddof=1)) if len(r) > 1 else 0.0,
-                        "p_one_sided": float((1 + (r >= o.mean_norm_gain).sum()) / (len(r) + 1)), "n_controls": len(r)})
+            ctl.append(
+                {
+                    "source_task": o.source_task,
+                    "target_task": o.target_task,
+                    "regime": o.regime,
+                    "k": o.k,
+                    "observed_method": o.method,
+                    "control": cm,
+                    "observed_mean": o.mean_norm_gain,
+                    "control_mean": float(r.mean()),
+                    "control_sd": float(r.std(ddof=1)) if len(r) > 1 else 0.0,
+                    "p_one_sided": float(
+                        (1 + (r >= o.mean_norm_gain).sum()) / (len(r) + 1)
+                    ),
+                    "n_controls": len(r),
+                }
+            )
     return summary, tests, pd.DataFrame(ctl)
 
 
@@ -1171,31 +1513,55 @@ def _spearman(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.corrcoef(ra, rb)[0, 1])
 
 
-def summarize_layers(lrows: pd.DataFrame, scores_by_task: Dict[str, Dict], space: ComponentSpace) -> pd.DataFrame:
+def summarize_layers(
+    lrows: pd.DataFrame, scores_by_task: Dict[str, Dict], space: ComponentSpace
+) -> pd.DataFrame:
     """Per-layer cross-task metrics: transfer (norm gain), rescue/induction,
     and Spearman correlation of the two tasks' head-AIE profiles in that layer."""
     out = []
     if lrows.empty:
         return pd.DataFrame()
-    for key, g in lrows.groupby(["source_task", "target_task", "regime", "probe", "layer", "run_type"]):
+    for key, g in lrows.groupby(
+        ["source_task", "target_task", "regime", "probe", "layer", "run_type"]
+    ):
         s, t, rg, probe, l, rt = key
         hallu = g[g.hallucinated]
         ok = g[g.correct_base]
-        row = {"source_task": s, "target_task": t, "regime": rg, "probe": probe, "layer": l, "run_type": rt,
-               "n": len(g), "mean_norm_gain": g.norm_gain.mean(),
-               "rescue_rate": hallu.correct_after.mean() if (len(hallu) and rt == "corrupt") else np.nan,
-               "induction_rate": (1 - ok.correct_after).mean() if len(ok) else np.nan}
+        row = {
+            "source_task": s,
+            "target_task": t,
+            "regime": rg,
+            "probe": probe,
+            "layer": l,
+            "run_type": rt,
+            "n": len(g),
+            "mean_norm_gain": g.norm_gain.mean(),
+            "rescue_rate": (
+                hallu.correct_after.mean()
+                if (len(hallu) and rt == "corrupt")
+                else np.nan
+            ),
+            "induction_rate": (1 - ok.correct_after).mean() if len(ok) else np.nan,
+        }
         if s in scores_by_task and t in scores_by_task:
             hs = space.heads_in_layer(int(l))
-            row["head_aie_spearman"] = _spearman(scores_by_task[s]["aie"][hs], scores_by_task[t]["aie"][hs])
+            row["head_aie_spearman"] = _spearman(
+                scores_by_task[s]["aie"][hs], scores_by_task[t]["aie"][hs]
+            )
         out.append(row)
     res = pd.DataFrame(out)
     # relative transfer: T_l(s->t) / T_l(t->t)
     if not res.empty:
-        diag = res[res.source_task == res.target_task][["target_task", "regime", "probe", "layer", "run_type", "mean_norm_gain"]]
+        diag = res[res.source_task == res.target_task][
+            ["target_task", "regime", "probe", "layer", "run_type", "mean_norm_gain"]
+        ]
         diag = diag.rename(columns={"mean_norm_gain": "in_task_gain"})
-        res = res.merge(diag, on=["target_task", "regime", "probe", "layer", "run_type"], how="left")
-        res["relative_transfer"] = res.mean_norm_gain / res.in_task_gain.replace(0, np.nan)
+        res = res.merge(
+            diag, on=["target_task", "regime", "probe", "layer", "run_type"], how="left"
+        )
+        res["relative_transfer"] = res.mean_norm_gain / res.in_task_gain.replace(
+            0, np.nan
+        )
     return res
 
 
@@ -1204,8 +1570,16 @@ def summarize_layers(lrows: pd.DataFrame, scores_by_task: Dict[str, Dict], space
 # =====================================================================
 
 
-def make_plots(out_dir: str, summary: pd.DataFrame, layer_sum: pd.DataFrame, cka: pd.DataFrame, dirs: pd.DataFrame,
-               primary_k: int, scores_by_task: Dict[str, Dict], space: ComponentSpace):
+def make_plots(
+    out_dir: str,
+    summary: pd.DataFrame,
+    layer_sum: pd.DataFrame,
+    cka: pd.DataFrame,
+    dirs: pd.DataFrame,
+    primary_k: int,
+    scores_by_task: Dict[str, Dict],
+    space: ComponentSpace,
+):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -1224,79 +1598,147 @@ def make_plots(out_dir: str, summary: pd.DataFrame, layer_sum: pd.DataFrame, cka
         ax.set_ylabel("layer")
         ax.set_title(f"{t}: AIE (discovery split, final-position patching)")
         fig.colorbar(im, ax=ax)
-        fig.tight_layout(); fig.savefig(os.path.join(out_dir, f"aie_{t}.png"), dpi=160); plt.close(fig)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"aie_{t}.png"), dpi=160)
+        plt.close(fig)
 
     # transfer matrices at primary k
     for rg in ("patch", "steer"):
         for m in ("topk_aie", "harm_aware", "harm_routing", "random"):
-            sub = summary[(summary.regime == rg) & (summary.method == m) & (summary.k == primary_k)]
+            sub = summary[
+                (summary.regime == rg)
+                & (summary.method == m)
+                & (summary.k == primary_k)
+            ]
             if sub.empty:
                 continue
             src = sorted(set(sub.source_task))
             M = np.full((len(src), len(tasks)), np.nan)
             for _, r in sub.iterrows():
                 if r.target_task in tasks:
-                    M[src.index(r.source_task), tasks.index(r.target_task)] = r.mean_norm_gain
+                    M[src.index(r.source_task), tasks.index(r.target_task)] = (
+                        r.mean_norm_gain
+                    )
             fig, ax = plt.subplots(figsize=(7, 6))
             im = ax.imshow(M, cmap="viridis")
-            ax.set_xticks(range(len(tasks))); ax.set_xticklabels(tasks, rotation=30, ha="right")
-            ax.set_yticks(range(len(src))); ax.set_yticklabels(src)
-            ax.set_xlabel("target task (test split)"); ax.set_ylabel("source task (circuit)")
+            ax.set_xticks(range(len(tasks)))
+            ax.set_xticklabels(tasks, rotation=30, ha="right")
+            ax.set_yticks(range(len(src)))
+            ax.set_yticklabels(src)
+            ax.set_xlabel("target task (test split)")
+            ax.set_ylabel("source task (circuit)")
             for i in range(M.shape[0]):
                 for j in range(M.shape[1]):
-                    ax.text(j, i, "NA" if np.isnan(M[i, j]) else f"{M[i, j]:.2f}", ha="center", va="center", color="w")
+                    ax.text(
+                        j,
+                        i,
+                        "NA" if np.isnan(M[i, j]) else f"{M[i, j]:.2f}",
+                        ha="center",
+                        va="center",
+                        color="w",
+                    )
             ax.set_title(f"{rg} / {m}: mean normalized gain (k={primary_k})")
-            fig.colorbar(im, ax=ax); fig.tight_layout()
-            fig.savefig(os.path.join(out_dir, f"transfer_{rg}_{m}_k{primary_k}.png"), dpi=160); plt.close(fig)
+            fig.colorbar(im, ax=ax)
+            fig.tight_layout()
+            fig.savefig(
+                os.path.join(out_dir, f"transfer_{rg}_{m}_k{primary_k}.png"), dpi=160
+            )
+            plt.close(fig)
 
     # k-sensitivity per method (in-task, averaged over tasks)
     for rg in ("patch", "steer"):
-        sub = summary[(summary.regime == rg) & (summary.source_task == summary.target_task)]
+        sub = summary[
+            (summary.regime == rg) & (summary.source_task == summary.target_task)
+        ]
         if sub.empty:
             continue
         fig, ax = plt.subplots(figsize=(8, 5))
         for m, g in sub.groupby("method"):
             gg = g.groupby("k").mean_norm_gain.mean()
             ax.plot(gg.index, gg.values, marker="o", label=m)
-        ax.set_xlabel("k"); ax.set_ylabel("mean normalized gain (in-task, test)")
-        ax.set_title(f"{rg}: gain vs circuit size"); ax.legend(); ax.grid(alpha=0.3)
-        fig.tight_layout(); fig.savefig(os.path.join(out_dir, f"k_sensitivity_{rg}.png"), dpi=160); plt.close(fig)
+        ax.set_xlabel("k")
+        ax.set_ylabel("mean normalized gain (in-task, test)")
+        ax.set_title(f"{rg}: gain vs circuit size")
+        ax.legend()
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"k_sensitivity_{rg}.png"), dpi=160)
+        plt.close(fig)
         fig, ax = plt.subplots(figsize=(8, 5))
         for m, g in sub.groupby("method"):
             gg = g.groupby("k")[["rescue_rate", "induction_rate_corrupt"]].mean()
             ax.plot(gg.index, gg.rescue_rate, marker="o", label=f"{m} rescue")
-            ax.plot(gg.index, gg.induction_rate_corrupt, marker="x", ls="--", label=f"{m} induction")
-        ax.set_xlabel("k"); ax.set_ylabel("rate"); ax.set_title(f"{rg}: rescue vs induction (in-task)")
-        ax.legend(fontsize=7, ncol=2); ax.grid(alpha=0.3)
-        fig.tight_layout(); fig.savefig(os.path.join(out_dir, f"rescue_induction_{rg}.png"), dpi=160); plt.close(fig)
+            ax.plot(
+                gg.index,
+                gg.induction_rate_corrupt,
+                marker="x",
+                ls="--",
+                label=f"{m} induction",
+            )
+        ax.set_xlabel("k")
+        ax.set_ylabel("rate")
+        ax.set_title(f"{rg}: rescue vs induction (in-task)")
+        ax.legend(fontsize=7, ncol=2)
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"rescue_induction_{rg}.png"), dpi=160)
+        plt.close(fig)
 
     # per-layer cross-task transfer curves
     if layer_sum is not None and not layer_sum.empty:
         for rg in ("patch", "steer"):
-            sub = layer_sum[(layer_sum.regime == rg) & (layer_sum.probe == "layer_topm") & (layer_sum.run_type == "corrupt")]
+            sub = layer_sum[
+                (layer_sum.regime == rg)
+                & (layer_sum.probe == "layer_topm")
+                & (layer_sum.run_type == "corrupt")
+            ]
             for t, g in sub.groupby("target_task"):
                 fig, ax = plt.subplots(figsize=(9, 5))
                 for s, gs in g.groupby("source_task"):
                     gs = gs.sort_values("layer")
-                    ax.plot(gs.layer, gs.mean_norm_gain, marker="o", ms=3, label=f"{s}→{t}")
+                    ax.plot(
+                        gs.layer, gs.mean_norm_gain, marker="o", ms=3, label=f"{s}→{t}"
+                    )
                 ax.axhline(0, color="k", lw=0.8)
-                ax.set_xlabel("layer"); ax.set_ylabel("mean normalized gain")
-                ax.set_title(f"{rg}: per-layer transfer into {t} (source top-m heads per layer)")
-                ax.legend(); ax.grid(alpha=0.3)
-                fig.tight_layout(); fig.savefig(os.path.join(out_dir, f"layer_transfer_{rg}_to_{t}.png"), dpi=160); plt.close(fig)
+                ax.set_xlabel("layer")
+                ax.set_ylabel("mean normalized gain")
+                ax.set_title(
+                    f"{rg}: per-layer transfer into {t} (source top-m heads per layer)"
+                )
+                ax.legend()
+                ax.grid(alpha=0.3)
+                fig.tight_layout()
+                fig.savefig(
+                    os.path.join(out_dir, f"layer_transfer_{rg}_to_{t}.png"), dpi=160
+                )
+                plt.close(fig)
 
     if cka is not None and not cka.empty:
         fig, ax = plt.subplots(figsize=(9, 5))
         for t, g in cka.groupby("task"):
             ax.plot(g.layer, g.paired_cka_debiased, marker="o", ms=3, label=t)
-        ax.set_xlabel("layer"); ax.set_ylabel("paired linear CKA (clean vs corrupt, debiased)")
-        ax.set_title("How much the corruption reshapes representations"); ax.legend(); ax.grid(alpha=0.3)
-        fig.tight_layout(); fig.savefig(os.path.join(out_dir, "paired_cka_clean_vs_corrupt.png"), dpi=160); plt.close(fig)
+        ax.set_xlabel("layer")
+        ax.set_ylabel("paired linear CKA (clean vs corrupt, debiased)")
+        ax.set_title("How much the corruption reshapes representations")
+        ax.legend()
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "paired_cka_clean_vs_corrupt.png"), dpi=160)
+        plt.close(fig)
     if dirs is not None and not dirs.empty:
         fig, ax = plt.subplots(figsize=(9, 5))
         for (a, b, kind), g in dirs.groupby(["task_a", "task_b", "kind"]):
-            ax.plot(g.layer, g.direction_cosine, ls="--" if kind == "split_half" else "-",
-                    label=f"{a}" + (" (split-half)" if kind == "split_half" else f" ↔ {b}"))
-        ax.set_xlabel("layer"); ax.set_ylabel("cosine of mean (clean − corrupt) direction")
-        ax.set_title("Cross-task alignment of hallucination directions"); ax.legend(fontsize=7); ax.grid(alpha=0.3)
-        fig.tight_layout(); fig.savefig(os.path.join(out_dir, "direction_alignment.png"), dpi=160); plt.close(fig)
+            ax.plot(
+                g.layer,
+                g.direction_cosine,
+                ls="--" if kind == "split_half" else "-",
+                label=f"{a}" + (" (split-half)" if kind == "split_half" else f" ↔ {b}"),
+            )
+        ax.set_xlabel("layer")
+        ax.set_ylabel("cosine of mean (clean − corrupt) direction")
+        ax.set_title("Cross-task alignment of hallucination directions")
+        ax.legend(fontsize=7)
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "direction_alignment.png"), dpi=160)
+        plt.close(fig)
