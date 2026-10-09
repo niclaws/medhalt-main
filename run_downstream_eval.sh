@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="${PROJECT_DIR:-$HOME/projects/medhalt-main}"
+PROJECT_DIR="${PROJECT_DIR:-/scratch/adityasrikar.c/projects/medhalt-main}"   # $HOME expands; "~" inside quotes does not
 SCRATCH="${SCRATCH_DIR:-/scratch/adityasrikar.c/medhalt}"
 RESULTS_DIR="$SCRATCH/results_v4"
 OUTPUT_DIR="$SCRATCH/downstream_audit"
