@@ -38,10 +38,10 @@ echo "[preflight] OK: all four Python files present and consistent"
 
 # tag | HF model id
 MODELS=(
-  "med42_8b|m42-health/Llama3-Med42-8B"
-  "mistral_7b|mistralai/Mistral-7B-Instruct-v0.3"
+#  "med42_8b|m42-health/Llama3-Med42-8B"
+#  "mistral_7b|mistralai/Mistral-7B-Instruct-v0.3"
   "qwen3_8b|Qwen/Qwen3-8B"
-  "mediphi_3.8b|microsoft/MediPhi-Instruct"
+#  "mediphi_3.8b|microsoft/MediPhi-Instruct"
 )
 
 COMMON_ARGS=(
