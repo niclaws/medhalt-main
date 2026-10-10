@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """External medical QA safety audit for Med-HALT safe-layer steering.
 
@@ -34,7 +33,6 @@ from experiment_runner import (
 )
 from patching_engine import CausalEngine, Intervention, log
 from safe_layer_steering import wilson_upper
-
 
 MODELS = {
     "mediphi_3.8b": "microsoft/MediPhi-Instruct",
@@ -87,10 +85,7 @@ def load_samples(
         if name == "medqa":
             opts = row["options"]
 
-            choices = "\n".join(
-                f"{c}) {opts[c]}"
-                for c in answers
-            )
+            choices = "\n".join(f"{c}) {opts[c]}" for c in answers)
 
             prompt = (
                 "Answer the following multiple-choice medical question. "
@@ -102,9 +97,7 @@ def load_samples(
             gold = str(row["answer_idx"]).upper()
 
         else:
-            context = " ".join(
-                row["context"]["contexts"]
-            ).strip()
+            context = " ".join(row["context"]["contexts"]).strip()
 
             prompt = (
                 "Based on the following medical abstract, "
@@ -113,22 +106,20 @@ def load_samples(
                 f"Question: {row['question'].strip()}"
             )
 
-            gold = str(
-                row["final_decision"]
-            ).strip().lower()
+            gold = str(row["final_decision"]).strip().lower()
 
         if gold not in answers:
-            raise ValueError(
-                f"Unexpected gold answer {gold!r} in {name}"
-            )
+            raise ValueError(f"Unexpected gold answer {gold!r} in {name}")
 
-        samples.append({
-            "dataset_index": int(row["_original_index"]),
-            "prompt": prompt,
-            "prefill": "Answer:",
-            "answers": list(answers),
-            "gold": gold,
-        })
+        samples.append(
+            {
+                "dataset_index": int(row["_original_index"]),
+                "prompt": prompt,
+                "prefill": "Answer:",
+                "answers": list(answers),
+                "gold": gold,
+            }
+        )
 
     return samples
 
@@ -144,9 +135,7 @@ def _load_checkpoint(
 
     for path in (pairs_file, base_file):
         if not path.is_file():
-            raise FileNotFoundError(
-                f"Required training checkpoint missing: {path}"
-            )
+            raise FileNotFoundError(f"Required training checkpoint missing: {path}")
 
     pairs = torch.load(
         pairs_file,
@@ -161,42 +150,25 @@ def _load_checkpoint(
     )
 
     if len(pairs) != len(base):
-        raise ValueError(
-            f"Mismatched pairs/base checkpoints for {task}"
-        )
+        raise ValueError(f"Mismatched pairs/base checkpoints for {task}")
 
     with (run_dir / "splits.json").open() as f:
         splits = json.load(f)
 
     if task not in splits or "discovery" not in splits[task]:
-        raise ValueError(
-            f"No discovery split for {task}"
-        )
+        raise ValueError(f"No discovery split for {task}")
 
-    sample_to_index = {
-        str(p["sample_id"]): i
-        for i, p in enumerate(pairs)
-    }
+    sample_to_index = {str(p["sample_id"]): i for i, p in enumerate(pairs)}
 
-    ids = [
-        str(s)
-        for s in splits[task]["discovery"]
-    ]
+    ids = [str(s) for s in splits[task]["discovery"]]
 
     if not ids or len(set(ids)) != len(ids):
-        raise ValueError(
-            f"Empty or duplicate discovery IDs for {task}"
-        )
+        raise ValueError(f"Empty or duplicate discovery IDs for {task}")
 
     if any(s not in sample_to_index for s in ids):
-        raise ValueError(
-            f"Unmatched discovery IDs for {task}"
-        )
+        raise ValueError(f"Unmatched discovery IDs for {task}")
 
-    return [
-        base[sample_to_index[s]]
-        for s in ids
-    ]
+    return [base[sample_to_index[s]] for s in ids]
 
 
 def get_selection(
@@ -204,21 +176,14 @@ def get_selection(
     protocol: str,
     target: str,
 ) -> dict:
-    path = (
-        run_dir
-        / "safe_layer"
-        / "safe_layer_selection.csv"
-    )
+    path = run_dir / "safe_layer" / "safe_layer_selection.csv"
 
     if not path.exists():
         raise FileNotFoundError(path)
 
     df = pd.read_csv(path)
 
-    matches = df[
-        (df["protocol"] == protocol)
-        & (df["target"] == target)
-    ]
+    matches = df[(df["protocol"] == protocol) & (df["target"] == target)]
 
     if len(matches) != 1:
         raise ValueError(
@@ -230,13 +195,9 @@ def get_selection(
 
     row = matches.iloc[0].to_dict()
 
-    row["selected"] = (
-        str(row["selected"]).strip().lower() == "true"
-    )
+    row["selected"] = str(row["selected"]).strip().lower() == "true"
 
-    row["selection_tasks"] = str(
-        row["selection_tasks"]
-    ).split("+")
+    row["selection_tasks"] = str(row["selection_tasks"]).split("+")
 
     if row.get("router_mode", "vocab") != "vocab":
         raise ValueError(
@@ -246,21 +207,15 @@ def get_selection(
 
     if row["selected"]:
         if int(row["layer"]) < 0:
-            raise ValueError(
-                "Selected layer is invalid"
-            )
+            raise ValueError("Selected layer is invalid")
 
         if float(row["alpha"]) <= 0:
-            raise ValueError(
-                "Selected steering strength is invalid"
-            )
+            raise ValueError("Selected steering strength is invalid")
 
         # -inf is a valid calibrated threshold:
         # it means always activate steering.
         if np.isnan(float(row["tau"])):
-            raise ValueError(
-                "Selected configuration has no valid tau"
-            )
+            raise ValueError("Selected configuration has no valid tau")
 
     return row
 
@@ -285,67 +240,43 @@ def fit_from_discovery(
         vector_tasks = [vector_name]
 
     elif vector_name == "POOLED":
-        vector_tasks = [
-            t for t in tasks
-            if t in HALLUCINATION_TASKS
-        ]
+        vector_tasks = [t for t in tasks if t in HALLUCINATION_TASKS]
 
     elif vector_name.startswith("LOTO:"):
         heldout = vector_name.split(":", 1)[1]
 
         if heldout in tasks:
-            raise ValueError(
-                "LOTO target is present in selection tasks"
-            )
+            raise ValueError("LOTO target is present in selection tasks")
 
-        vector_tasks = [
-            t for t in tasks
-            if t in HALLUCINATION_TASKS
-        ]
+        vector_tasks = [t for t in tasks if t in HALLUCINATION_TASKS]
 
     else:
-        raise ValueError(
-            f"Unsupported steering vector: {vector_name}"
-        )
+        raise ValueError(f"Unsupported steering vector: {vector_name}")
 
     if not vector_tasks or not tasks:
-        raise ValueError(
-            "Empty vector or selection task list"
-        )
+        raise ValueError("Empty vector or selection task list")
 
     # Include guard tasks in router fitting when they
     # were used by the original training protocol.
-    base_by_task = {
-        task: _load_checkpoint(run_dir, task)
-        for task in tasks
-    }
+    base_by_task = {task: _load_checkpoint(run_dir, task) for task in tasks}
 
     vectors = []
 
     for task in vector_tasks:
         if task not in base_by_task:
-            raise ValueError(
-                f"Missing discovery source task: {task}"
-            )
+            raise ValueError(f"Missing discovery source task: {task}")
 
         entries = base_by_task[task]
 
-        vector = torch.stack([
-            b["resid_clean"].float()
-            - b["resid_corrupt"].float()
-            for b in entries
-        ]).mean(0)
+        vector = torch.stack(
+            [b["resid_clean"].float() - b["resid_corrupt"].float() for b in entries]
+        ).mean(0)
 
         vectors.append(vector)
 
     # Equal-weight average of task-level directions,
     # matching build_layer_vectors().
-    steer_vector = (
-        torch.stack(vectors)
-        .mean(0)
-        .float()
-        .cpu()
-    )
+    steer_vector = torch.stack(vectors).mean(0).float().cpu()
 
     feats = []
     wrong = []
@@ -353,18 +284,12 @@ def fit_from_discovery(
     for task in tasks:
         for b in base_by_task[task]:
             for run_type in ("clean", "corrupt"):
-                feats.append(
-                    router_features(b, run_type)
-                )
+                feats.append(router_features(b, run_type))
 
-                wrong.append(
-                    not bool(b[f"correct_{run_type}"])
-                )
+                wrong.append(not bool(b[f"correct_{run_type}"]))
 
     router = RiskRouter(
-        default_router_layers(
-            steer_vector.shape[0]
-        ),
+        default_router_layers(steer_vector.shape[0]),
         mode="vocab",
     )
 
@@ -407,38 +332,23 @@ def prepare_choices(
     ]
 
     if any(not c for c in continuations):
-        raise ValueError(
-            "Candidate is not a proper prompt continuation"
-        )
+        raise ValueError("Candidate is not a proper prompt continuation")
 
     common = 0
 
     while (
         all(len(c) > common for c in continuations)
-        and len({
-            c[common]
-            for c in continuations
-        }) == 1
+        and len({c[common] for c in continuations}) == 1
     ):
         common += 1
 
-    if any(
-        len(c) <= common
-        for c in continuations
-    ):
-        raise ValueError(
-            "Candidate is a shared-prefix-only continuation"
-        )
+    if any(len(c) <= common for c in continuations):
+        raise ValueError("Candidate is a shared-prefix-only continuation")
 
-    cand = [
-        c[common]
-        for c in continuations
-    ]
+    cand = [c[common] for c in continuations]
 
     if len(set(cand)) != len(cand):
-        raise ValueError(
-            "Candidate first-divergent tokens collide"
-        )
+        raise ValueError("Candidate first-divergent tokens collide")
 
     state = engine.prepare(
         base_ids + continuations[0][:common],
@@ -464,22 +374,15 @@ def evaluate(
 
     if active:
         if router is None or vector is None:
-            raise ValueError(
-                "Selected intervention requires router and vector"
-            )
+            raise ValueError("Selected intervention requires router and vector")
 
         if vector.shape != (
             engine.num_layers,
             engine.hidden_size,
         ):
-            raise ValueError(
-                f"Steering vector shape mismatch: {vector.shape}"
-            )
+            raise ValueError(f"Steering vector shape mismatch: {vector.shape}")
 
-        steer_resid = (
-            vector.unsqueeze(0)
-            .to(engine.device)
-        )
+        steer_resid = vector.unsqueeze(0).to(engine.device)
 
         intervention = [
             Intervention(
@@ -492,9 +395,7 @@ def evaluate(
             )
         ]
 
-    for i, sample in enumerate(
-        tqdm(samples, leave=False)
-    ):
+    for i, sample in enumerate(tqdm(samples, leave=False)):
         try:
             st, ids, prefix_length = prepare_choices(
                 engine,
@@ -502,11 +403,13 @@ def evaluate(
             )
 
         except ValueError as exc:
-            rejected.append({
-                "sample_id": i,
-                "dataset_index": sample["dataset_index"],
-                "reason": str(exc),
-            })
+            rejected.append(
+                {
+                    "sample_id": i,
+                    "dataset_index": sample["dataset_index"],
+                    "reason": str(exc),
+                }
+            )
             continue
 
         logits = st.cand_logits.numpy()
@@ -524,9 +427,7 @@ def evaluate(
                 batch_size=batch_size,
             )[0]
 
-            prediction_always = int(
-                steered_logits.argmax()
-            )
+            prediction_always = int(steered_logits.argmax())
 
             # Router must score the original prompt,
             # before any shared answer-prefix tokens.
@@ -542,47 +443,33 @@ def evaluate(
             }
 
             # Actual fitted logistic risk router.
-            risk_score = float(
-                router.predict([features])[0]
-            )
+            risk_score = float(router.predict([features])[0])
 
-            gated = bool(
-                risk_score > router.tau
-            )
+            gated = bool(risk_score > router.tau)
 
-        prediction_gated = (
-            prediction_always
-            if gated
-            else prediction_base
+        prediction_gated = prediction_always if gated else prediction_base
+
+        gold_idx = sample["answers"].index(sample["gold"])
+
+        rows.append(
+            {
+                "sample_id": i,
+                "dataset_index": sample["dataset_index"],
+                "gold": sample["gold"],
+                "pred_base": sample["answers"][prediction_base],
+                "pred_always": sample["answers"][prediction_always],
+                "pred_gated": sample["answers"][prediction_gated],
+                "correct_base": prediction_base == gold_idx,
+                "correct_always": prediction_always == gold_idx,
+                "correct_gated": prediction_gated == gold_idx,
+                "risk_score": risk_score,
+                "gate_threshold": (float(cfg["tau"]) if active else np.nan),
+                "steered_gated": gated,
+            }
         )
-
-        gold_idx = sample["answers"].index(
-            sample["gold"]
-        )
-
-        rows.append({
-            "sample_id": i,
-            "dataset_index": sample["dataset_index"],
-            "gold": sample["gold"],
-            "pred_base": sample["answers"][prediction_base],
-            "pred_always": sample["answers"][prediction_always],
-            "pred_gated": sample["answers"][prediction_gated],
-            "correct_base": prediction_base == gold_idx,
-            "correct_always": prediction_always == gold_idx,
-            "correct_gated": prediction_gated == gold_idx,
-            "risk_score": risk_score,
-            "gate_threshold": (
-                float(cfg["tau"])
-                if active
-                else np.nan
-            ),
-            "steered_gated": gated,
-        })
 
     if not rows:
-        raise ValueError(
-            "All samples failed candidate-token alignment"
-        )
+        raise ValueError("All samples failed candidate-token alignment")
 
     return (
         pd.DataFrame(rows),
@@ -597,10 +484,7 @@ def paired_bootstrap_interval(
     reps: int,
 ) -> tuple[float, float]:
 
-    diff = (
-        correct_after.astype(np.float64)
-        - correct_base.astype(np.float64)
-    )
+    diff = correct_after.astype(np.float64) - correct_base.astype(np.float64)
 
     rng = np.random.default_rng(seed)
 
@@ -635,23 +519,15 @@ def summarize(
         "n_samples": len(df),
         "n_correct_base": int(cb.sum()),
         "acc_base": float(cb.mean()),
-        "gate_rate": float(
-            df.steered_gated.mean()
-        ),
+        "gate_rate": float(df.steered_gated.mean()),
     }
 
     for method in ("always", "gated"):
-        ca = df[
-            f"correct_{method}"
-        ].to_numpy(dtype=bool)
+        ca = df[f"correct_{method}"].to_numpy(dtype=bool)
 
-        induced = int(
-            (cb & ~ca).sum()
-        )
+        induced = int((cb & ~ca).sum())
 
-        rescued = int(
-            (~cb & ca).sum()
-        )
+        rescued = int((~cb & ca).sum())
 
         lo, hi = paired_bootstrap_interval(
             cb,
@@ -674,41 +550,35 @@ def summarize(
             else 1.0
         )
 
-        result.update({
-            f"acc_{method}": float(ca.mean()),
-            f"delta_{method}": float(
-                ca.mean() - cb.mean()
-            ),
-            f"delta_{method}_ci_low": lo,
-            f"delta_{method}_ci_high": hi,
-            f"induced_{method}": induced,
-            f"rescued_{method}": rescued,
-            f"induction_rate_{method}": (
-                induced / cb.sum()
-                if cb.any()
-                else np.nan
-            ),
-            f"rescue_rate_{method}": (
-                rescued / (~cb).sum()
-                if (~cb).any()
-                else np.nan
-            ),
-            f"ucb_{method}": float(
-                wilson_upper(
-                    induced,
-                    int(cb.sum()),
-                )
-            ),
-            f"p_mcnemar_{method}": p_mcnemar,
-        })
+        result.update(
+            {
+                f"acc_{method}": float(ca.mean()),
+                f"delta_{method}": float(ca.mean() - cb.mean()),
+                f"delta_{method}_ci_low": lo,
+                f"delta_{method}_ci_high": hi,
+                f"induced_{method}": induced,
+                f"rescued_{method}": rescued,
+                f"induction_rate_{method}": (
+                    induced / cb.sum() if cb.any() else np.nan
+                ),
+                f"rescue_rate_{method}": (
+                    rescued / (~cb).sum() if (~cb).any() else np.nan
+                ),
+                f"ucb_{method}": float(
+                    wilson_upper(
+                        induced,
+                        int(cb.sum()),
+                    )
+                ),
+                f"p_mcnemar_{method}": p_mcnemar,
+            }
+        )
 
     return result
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        description=__doc__
-    )
+    ap = argparse.ArgumentParser(description=__doc__)
 
     ap.add_argument(
         "--results_dir",
@@ -810,14 +680,15 @@ def main() -> None:
 
     args = ap.parse_args()
 
-    if min(
-        args.n_medqa,
-        args.n_pubmedqa,
-        args.bootstrap_samples,
-    ) <= 0:
-        ap.error(
-            "Sample counts and bootstrap_samples must be positive"
+    if (
+        min(
+            args.n_medqa,
+            args.n_pubmedqa,
+            args.bootstrap_samples,
         )
+        <= 0
+    ):
+        ap.error("Sample counts and bootstrap_samples must be positive")
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(
@@ -851,15 +722,10 @@ def main() -> None:
         model_name = MODELS[tag]
 
         for seed in args.seeds:
-            run_dir = (
-                Path(args.results_dir)
-                / f"{tag}_seed{seed}"
-            )
+            run_dir = Path(args.results_dir) / f"{tag}_seed{seed}"
 
             if not run_dir.is_dir():
-                log(
-                    f"[SKIP] No run directory: {run_dir}"
-                )
+                log(f"[SKIP] No run directory: {run_dir}")
                 continue
 
             selected = {}
@@ -872,19 +738,13 @@ def main() -> None:
                         target,
                     )
                 except (FileNotFoundError, ValueError) as exc:
-                    log(
-                        f"[SKIP] {tag}/seed{seed}/{target}: {exc}"
-                    )
+                    log(f"[SKIP] {tag}/seed{seed}/{target}: {exc}")
 
             if not selected:
-                log(
-                    f"[SKIP] No matching configurations in {run_dir}"
-                )
+                log(f"[SKIP] No matching configurations in {run_dir}")
                 continue
 
-            log(
-                f"[Model] {model_name} seed={seed}"
-            )
+            log(f"[Model] {model_name} seed={seed}")
 
             engine = CausalEngine(
                 model_name,
@@ -916,14 +776,12 @@ def main() -> None:
                         )
 
                         preds.to_csv(
-                            out_dir
-                            / f"{label}_{dataset_name}_predictions.csv",
+                            out_dir / f"{label}_{dataset_name}_predictions.csv",
                             index=False,
                         )
 
                         rejects.to_csv(
-                            out_dir
-                            / f"{label}_{dataset_name}_rejected.csv",
+                            out_dir / f"{label}_{dataset_name}_rejected.csv",
                             index=False,
                         )
 
@@ -933,30 +791,29 @@ def main() -> None:
                             args.bootstrap_samples,
                         )
 
-                        metrics.update({
-                            "model_tag": tag,
-                            "model_name": model_name,
-                            "seed": seed,
-                            "protocol": args.protocol,
-                            "selection_target": target,
-                            "selection_vec": cfg["vec"],
-                            "selection_tasks": "+".join(
-                                cfg["selection_tasks"]
-                            ),
-                            "selected": cfg["selected"],
-                            "layer": int(cfg["layer"]),
-                            "alpha": float(cfg["alpha"]),
-                            "tau": float(cfg["tau"]),
-                            "dataset": dataset_name,
-                            "dataset_split": DATASETS[dataset_name][2],
-                            "sample_seed": args.sample_seed,
-                            "n_requested": len(samples),
-                            "n_rejected": len(rejects),
-                            "safety_ucb_gated_le_eps": (
-                                metrics["ucb_gated"]
-                                <= args.harm_eps
-                            ),
-                        })
+                        metrics.update(
+                            {
+                                "model_tag": tag,
+                                "model_name": model_name,
+                                "seed": seed,
+                                "protocol": args.protocol,
+                                "selection_target": target,
+                                "selection_vec": cfg["vec"],
+                                "selection_tasks": "+".join(cfg["selection_tasks"]),
+                                "selected": cfg["selected"],
+                                "layer": int(cfg["layer"]),
+                                "alpha": float(cfg["alpha"]),
+                                "tau": float(cfg["tau"]),
+                                "dataset": dataset_name,
+                                "dataset_split": DATASETS[dataset_name][2],
+                                "sample_seed": args.sample_seed,
+                                "n_requested": len(samples),
+                                "n_rejected": len(rejects),
+                                "safety_ucb_gated_le_eps": (
+                                    metrics["ucb_gated"] <= args.harm_eps
+                                ),
+                            }
+                        )
 
                         results.append(metrics)
 
@@ -983,10 +840,7 @@ def main() -> None:
     summary = pd.DataFrame(results)
 
     # Preserve original output filename for compatibility.
-    path = (
-        out_dir
-        / "downstream_zero_degradation_summary.csv"
-    )
+    path = out_dir / "downstream_zero_degradation_summary.csv"
 
     summary.to_csv(
         path,
@@ -1033,16 +887,9 @@ def main() -> None:
         "p_mcnemar_gated",
     ]
 
-    print(
-        "\nDOWNSTREAM SAFETY AUDIT "
-        "(not a zero-degradation claim)\n"
-    )
+    print("\nDOWNSTREAM SAFETY AUDIT " "(not a zero-degradation claim)\n")
 
-    print(
-        summary[cols]
-        .round(4)
-        .to_string(index=False)
-    )
+    print(summary[cols].round(4).to_string(index=False))
 
     log(f"Summary: {path}")
 
