@@ -15,7 +15,7 @@ SCRIPT="$PROJECT_DIR/run_casual_transfer.py"
 SCRATCH="${SCRATCH_DIR:-/scratch/adityasrikar.c/medhalt}"
 RESULTS="$SCRATCH/results_v4"   # v4 checkpoints are not compatible with earlier versions
 LOGS="$SCRATCH/logs_v4"
-HF_REPO="${HF_REPO:-damonsalvatore123/medhalt}"
+HF_REPO="${HF_REPO:-ENETER_REPO_ID/medhalt}"
 SEEDS=(${SEEDS:-0 1 2})
 
 mkdir -p "$RESULTS" "$LOGS"

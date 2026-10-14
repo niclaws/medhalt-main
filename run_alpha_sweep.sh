@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Sequential: each run loads only one model, one seed, then evaluates every
-# alpha cap and both Med-HALT splits plus MedQA/PubMedQA with that model loaded.
 set -euo pipefail
 
 RESULTS_DIR="results/results_v4/"

@@ -1,21 +1,3 @@
-#!/usr/bin/env python3
-"""Evaluate multiple SOFTMAX STEERING ALPHA CAPS in one sequential model load.
-
-Additive standalone experiment: does NOT alter original discovery, steering,
-softmax files, or model weights. It reuses existing .pt checkpoints and
-selection policies under results/results_v4/{model}_seed{seed}.
-
-For each question, baseline/always-on are computed once; probability-weighted
-steering is evaluated separately at each alpha cap. This saves time versus
-restarting the whole model for every alpha value.
-
-    alpha_effective = min(alpha_selected, alpha_cap) * P_softmax(steer)
-
-P_softmax is the SAME original error-risk softmax gate, with unchanged
---temperature and --center for all caps. Always-on uses alpha_selected.
-No gate labels, test answers, or downstream labels are used for tuning.
-"""
-
 from __future__ import annotations
 
 import argparse

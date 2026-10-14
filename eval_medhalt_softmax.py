@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-"""Med-HALT original-task evaluation with a CONTINUOUS 2-class softmax gate.
-
-Does not edit the original code. Rebuilds the original discovery-based residual
-vector/router using eval_downstream_all_models.fit_from_discovery, then evaluates
-new actual model forward passes with alpha_effective = alpha * P(steer).
-
-Test or unfiltered split and clean/corrupt prompt evaluation are supported.
-Original local .pt checkpoints must exist; CSV-only ZIP cannot reproduce
-arbitrary new steering strengths.
-"""
-
 from __future__ import annotations
 import argparse
 import gc

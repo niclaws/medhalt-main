@@ -1,55 +1,18 @@
-"""
-patching_engine.py — the single causal-intervention engine for the Med-HALT study.
-
-What this module guarantees (each point fixes a defect of the previous version):
-
-1. Heads are real heads.  Head h of layer l is the slice
-   z[..., h*d:(h+1)*d] of the *input* of self_attn.o_proj (concatenated per-head
-   attention outputs, before the output projection mixes them).  Hooks are
-   forward-pre-hooks on o_proj.  num_heads = config.num_attention_heads and the
-   code asserts o_proj.in_features == num_heads * head_dim.
-
-2. One intervention site.  Every patch / steer is applied at the final prompt
-   position only (the decision position).  Because attention is causal, an
-   intervention at the last position cannot change any earlier position, so the
-   prefix (all tokens but the last) is run once with use_cache=True and every
-   intervention is a *single-token* forward over that cached prefix.  Many
-   interventions on the same sample are batched by expanding the prefix cache.
-   `verify_cached_equivalence` checks this against full-sequence forwards.
-
-3. Prompts come from the tokenizer's own chat template
-   (apply_chat_template(..., add_generation_prompt=True, enable_thinking=False)),
-   tokenized with add_special_tokens=False so BOS is never doubled.  Qwen3 gets
-   its empty <think></think> block from its template.  The answer prefix
-   ("Answer:", "Title:", the PubMed URL stem) is pre-filled inside the assistant
-   turn so the scored token is the one the model would actually emit next.
-
-4. Answer tokens are found *in context* (tokenize prompt+candidate, take the
-   continuation), multi-token answers are scored at their first divergent token
-   after a shared prefix that is appended to the prompt, and all logits / logit
-   differences are computed in float32.
-
-5. CKA is computed only on paired rows (same inputs) — see `paired_linear_cka`.
-"""
-
 from __future__ import annotations
 
 import math
+import numpy as np
+import torch
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from typing import Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
-import numpy as np
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-IST = ZoneInfo("Asia/Kolkata")
-
 
 def now() -> str:
-    return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now()
 
 
 def log(msg: str) -> None:

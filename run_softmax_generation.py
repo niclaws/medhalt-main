@@ -1,18 +1,3 @@
-#!/usr/bin/env python3
-"""New standalone free-generation runner with probability-weighted steering.
-
-Example:
- python run_softmax_generation.py \
-   --results_dir /path/to/results_v4 --model med42_8b --seed 0 \
-   --protocol source:FCT --selection_target FCT \
-   --prompt 'Which vitamin deficiency causes scurvy?' \
-   --temperature 1.5 --max_new_tokens 64
-
-The gate outputs probabilities; the actual residual steering is multiplied by
-P(on), and the model generates with that continuous effective alpha. Existing
-files are imported but NOT changed. Original discovery checkpoints required.
-"""
-
 from __future__ import annotations
 import argparse
 import json

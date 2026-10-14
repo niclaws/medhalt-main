@@ -1,20 +1,3 @@
-"""Drop-in *additive* probabilistic steering adapter for the existing CausalEngine.
-
-No original file needs to be changed.  The fitted RiskRouter.predict() returns an
-estimated P(base prediction incorrect).  Convert that to a *two-class softmax*
-P(steer) and continuously scale the intervention strength:
-
-    P(off), P(on) = softmax([0, (logit(risk)-logit(center))/temperature])
-    residual' = residual + (alpha * P(on)) * steering_vector
-
-Default center=.5, temperature=1 means P(on)=risk (up to numeric clipping).
-The old hard threshold tau is deliberately NOT used by default: selected
-policies often had tau=-inf, making a tau-centered gate always-on.
-
-P(steer) is a *routing weight*, not a calibrated probability that steering
-will improve the answer.  Fit/check calibration and held-out harm separately.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

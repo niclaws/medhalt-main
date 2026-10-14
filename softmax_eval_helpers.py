@@ -1,9 +1,3 @@
-"""Shared stand-alone metrics and cached-split helpers for softmax steering.
-
-Requires ORIGINAL local state checkpoints (pairs_*.pt and base_*.pt); the
-research-paper ZIP built with --skip-checkpoints does not contain them.
-"""
-
 from __future__ import annotations
 import json
 from pathlib import Path

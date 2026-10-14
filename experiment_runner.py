@@ -1,29 +1,3 @@
-"""
-experiment_runner.py — discovery, circuit selection, mitigation and evaluation.
-
-Two intervention regimes are evaluated on the SAME held-out test samples:
-
-  patch : oracle activation patching. The selected components on the corrupt run
-          receive the clean run's activations at the final position. This is the
-          mechanistic / transfer analysis. It needs the clean reference, so it is
-          not a deployable mitigation.
-  steer : activation steering. delta[c] = mean_discovery(clean_act - corrupt_act)
-          is added (scaled by alpha) to each selected component on any run. It
-          needs no oracle, so it is the deployable mitigation. It is applied to
-          corrupt runs (rescue) AND clean runs (induction of new errors).
-
-Selection methods, for every k in --k_values:
-  topk_aie        top-k by |AIE| (the original baseline, now computed correctly)
-  random          uniform random k components (excluding top-k), R replicates
-  layer_matched   random component of the same (layer, type) per top-k component
-  contiguous      best contiguous window of k components (layer-major order)
-  harm_aware      top-k by S(c) = R(c) - lambda * H(c), lambda (and alpha) chosen
-                  on the validation split by evaluating the *joint* circuit
-  harm_routing    harm_aware steering gated per input by a calibrated
-                  hallucination-risk estimator (steer regime only)
-  none            unmodified model
-"""
-
 from __future__ import annotations
 
 import json

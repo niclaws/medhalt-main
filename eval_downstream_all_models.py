@@ -1,17 +1,3 @@
-#!/usr/bin/env python3
-"""External medical QA safety audit for Med-HALT safe-layer steering.
-
-Reconstructs the trained RiskRouter from the original discovery-only
-checkpoints and uses the validation-calibrated threshold.
-
-Each selection target (FCT/NOTA) is a Med-HALT transfer configuration,
-not a new LOTO fit on the external dataset.
-
-Accuracy is restricted-candidate, first-divergent-token accuracy,
-not free-generation clinical factuality.
-PubMedQA pqa_labeled is a TRAIN split.
-"""
-
 from __future__ import annotations
 
 import argparse

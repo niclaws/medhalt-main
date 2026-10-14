@@ -1,20 +1,3 @@
-#!/usr/bin/env python3
-"""New non-invasive probabilistic softmax-gated MedQA / PubMedQA runner.
-
-Place this file and the two adapters beside the ORIGINAL files:
-  eval_downstream_all_models.py, patching_engine.py,
-  experiment_runner.py, safe_layer_steering.py
-
-The original code is imported for checkpoint reconstruction and tokenization,
-never edited. Per question, the fitted error-risk score is passed through a
-2-class softmax; P(on) CONTINUOUSLY scales residual-stream alpha. A fresh model
-forward evaluates soft steering. Predictions include answer probabilities, gate
-probability, and effective alpha; no risk>tau Boolean gate is used.
-
-Requires your local ORIGINAL .pt checkpoints in --results_dir/*_seed*/state.
-The archival research ZIP created with --skip-checkpoints is NOT sufficient.
-"""
-
 from __future__ import annotations
 import argparse
 import gc
