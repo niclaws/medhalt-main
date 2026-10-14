@@ -105,26 +105,6 @@ This probability estimates baseline-error propensity, **not** the probability th
 - **Generation audit:** automatically labeled output-level proxies and optional human review sheets. These are **not** clinician-adjudicated medical hallucination outcomes.
 - **Uncertainty and controls:** bootstrap estimates, paired tests, random controls, and across-seed summaries where supported by the scripts.
 
-## Implementation files
-
-The following filenames refer to the project-root source files (the attached or archived source copies may have date/version suffixes that should be removed **only after** matching compatible versions):
-
-| File | Purpose |
-|---|---|
-| `run_casual_transfer.py` | Main contrastive-pair, safe-layer, component-discovery, patching, steering, and evaluation pipeline. |
-| `patching_engine.py` | Model inference and activation intervention hooks. |
-| `experiment_runner.py` | Scoring, transfer, controls, representation analysis, and routing utilities. |
-| `safe_layer_steering.py` | Layer policies, safety criteria, hard gating, and associated plots. |
-| `script.sh` | Batch launcher with stage-level resume, per-model/per-seed logging, and optional seed aggregation. |
-| `eval_downstream_all_models.py` | Original MedQA/PubMedQA baseline, always-on, and hard-gated audit. |
-| `run_downstream_eval.sh` | Wrapper for the original downstream audit. |
-| `softmax_gate_adapter.py`, `softmax_eval_helpers.py` | Continuous two-class softmax gate and supporting metrics/checkpoint utilities. |
-| `eval_medhalt_softmax.py` | Softmax-gated held-out Med-HALT clean/corrupt evaluation. |
-| `eval_downstream_softmax.py` | Softmax-gated external MedQA/PubMedQA evaluation. |
-| `eval_softmax_alpha_sweep.py` | Caps on steering strength, evaluated across requested datasets/splits. |
-| `run_alpha_sweep_sequential.sh` | Sequential multi-model/multi-seed alpha sweep (alternate archives may name the wrapper `run_softmax_alpha_sweep.sh`). |
-| `run_softmax_generation.py` | Free-form generation with the continuous gate. |
-| `calculate_hallucination_metrics.py` | Additional result-file-based automatic metrics. |
 
 **Versioning:** use mutually compatible versions of all core Python modules. The checkpoint-based softmax runners require the original discovery outputs in `results_v4`, not just compact CSV archives. V4 `state/` checkpoints are not interchangeable with older experiment versions.
 
