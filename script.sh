@@ -45,8 +45,8 @@ MODELS=(
 )
 
 COMMON_ARGS=(
-  --n_samples 300
-  --max_pairs_per_task 200
+  --n_samples 1200
+  --max_pairs_per_task 1000
   --top_k 20
   --k_values 5 10 15 20 30 50
   --lambdas 0 0.5 1 2 4 8
