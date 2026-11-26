@@ -22,7 +22,7 @@ for stage in audit format attenuation strength treatment probe; do
     echo "Time: $(date)"
     echo "========================================"
 
-    bash rebuttal/run_rebuttal.sh "$stage" \
+    bash rebuttal/run_rebuttal_individual.sh "$stage" \
         --splits test \
         --quantization none \
         --fail-fast
@@ -36,7 +36,7 @@ done
 
 #export MODELS="medgemma_27b med42_70b"
 #
-#bash rebuttal/run_rebuttal.sh scale \
+#bash rebuttal/run_rebuttal_individual.sh scale \
 #    --quantization nf4 \
 #    --large-mode layer \
 #    --large-all-layers \
