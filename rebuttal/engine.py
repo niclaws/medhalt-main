@@ -54,12 +54,6 @@ def nf4_load_kwargs(dtype, max_memory=None, allow_cpu_offload=False):
         ) from e
     return dict(
         device_map="auto",
-        max_memory={
-            0: "6GiB",
-            1: "6GiB",
-            2: "6GiB",
-            3: "6GiB",
-        },
         quantization_config=BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -129,12 +123,6 @@ class ShardedEngine(CausalEngine):
             **kw,
             torch_dtype=self.dtype,
             device_map="auto",
-            max_memory={
-                0: "6GiB",
-                1: "6GiB",
-                2: "6GiB",
-                3: "6GiB",
-            },
             low_cpu_mem_usage=True,
         )
         if max_memory:

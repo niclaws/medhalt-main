@@ -104,12 +104,7 @@ def run_small(tag,args,root,samples):
     # Verify exact source inputs before allocating GPU memory.
     for t in TASKS: timed_call('run.load', run.load, t)
     if not torch.cuda.is_available(): raise RuntimeError('GPU unavailable. CPU-only audit/plan supported; actual inference requires CUDA.')
-    engine=engine_for(tag,args,run); write_json(dest/'model_runtime.json',dict(model_name=engine.model_name,layers=engine.num_layers,heads=engine.num_heads,head_dim=engine.head_dim,hidden_size=engine.hidden_size,dtype=str(engine.dtype),device_map="auto",max_memory={
-    0: "6GiB",
-    1: "6GiB",
-    2: "6GiB",
-    3: "6GiB",
-},model_commit=getattr(engine.model.config,'_commit_hash',None),tokenizer_class=type(engine.tokenizer).__name__,engine=type(engine).__name__))
+    engine=engine_for(tag,args,run); write_json(dest/'model_runtime.json',dict(model_name=engine.model_name,layers=engine.num_layers,heads=engine.num_heads,head_dim=engine.head_dim,hidden_size=engine.hidden_size,dtype=str(engine.dtype),device_map="auto",model_commit=getattr(engine.model.config,'_commit_hash',None),tokenizer_class=type(engine.tokenizer).__name__,engine=type(engine).__name__))
     try:
         if 'attenuation' in exps:
             from .layer_controls import run_attenuation
@@ -167,12 +162,7 @@ def run_large(tag,args,root):
     if not torch.cuda.is_available(): raise RuntimeError('CUDA required')
     from .large import prepare_new_run,run_scale_layer,run_scale_component
     dest=root/f'{tag}_seed{args.seed}'; store=Store(dest,dict(**settings(args),model=tag,code=code_fingerprint()),args.resume); write_json(dest/'environment.json',versions())
-    engine=engine_for(tag,args,None); write_json(dest/'model_runtime.json',dict(model_name=engine.model_name,model_commit=getattr(engine.model.config,'_commit_hash',None),device_map="auto",max_memory={
-    0: "8GiB",
-    1: "8GiB",
-    2: "8GiB",
-    3: "8GiB",
-},layers=engine.num_layers,heads=engine.num_heads,head_dim=engine.head_dim,hidden_size=engine.hidden_size,dtype=str(engine.dtype),quantization=getattr(engine,'quantization_metadata',{'mode':'none'})))
+    engine=engine_for(tag,args,None); write_json(dest/'model_runtime.json',dict(model_name=engine.model_name,model_commit=getattr(engine.model.config,'_commit_hash',None),device_map="auto",layers=engine.num_layers,heads=engine.num_heads,head_dim=engine.head_dim,hidden_size=engine.hidden_size,dtype=str(engine.dtype),quantization=getattr(engine,'quantization_metadata',{'mode':'none'})))
     try:
         run=prepare_new_run(engine,args,dest/'new_checkpoints',MODELS[tag]); timed_call('run.audit', run.audit, dest/'data_audit')
         fn=run_scale_layer if args.large_mode=='layer' else run_scale_component

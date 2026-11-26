@@ -90,12 +90,6 @@ def _run(a):
         num_heads=e.num_heads,
         head_dim=e.head_dim,
         device_map="auto",
-        max_memory={
-            0: "6GiB",
-            1: "6GiB",
-            2: "6GiB",
-            3: "6GiB",
-        },
         environment=versions(),
         quantization=getattr(e, "quantization_metadata", {"mode": "none"}),
         peak_vram_bytes=torch.cuda.max_memory_allocated(0),

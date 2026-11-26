@@ -45,12 +45,6 @@ class Model:
                 torch_dtype=torch.float16,
                 load_in_8bit=load_in_8bit,
                 device_map="auto",
-                max_memory={
-                    0: "6GiB",
-                    1: "6GiB",
-                    2: "6GiB",
-                    3: "6GiB",
-                },
                 trust_remote_code=True,
             )
 
