@@ -1,3 +1,9 @@
+"""Load language models and generate predictions for Med-HALT prompts.
+
+The ``Model`` wrapper handles tokenizer/model setup, batching prompt datasets,
+and writing generated answers to the formats consumed by evaluation code.
+"""
+
 import os, json, time
 from tqdm import tqdm
 from torch.utils.data import DataLoader
@@ -10,6 +16,7 @@ import csv
 
 
 class Model:
+    """Load a text-generation model and provide methods for batched inference and saving outputs."""
 
     def __init__(
         self,
@@ -19,7 +26,7 @@ class Model:
         load_in_4bit=False,
         rest_client=None,
     ) -> None:
-
+        """Store the model, data, or configuration needed by this object. See the assignments below for each setting."""
         self.rest_client = rest_client
         self.model_path = model_id_or_path
 
@@ -37,7 +44,13 @@ class Model:
                 revision=revision,
                 torch_dtype=torch.float16,
                 load_in_8bit=load_in_8bit,
-                device_map="balanced_low_0",
+                device_map="auto",
+                max_memory={
+                    0: "6GiB",
+                    1: "6GiB",
+                    2: "6GiB",
+                    3: "6GiB",
+                },
                 trust_remote_code=True,
             )
 
@@ -50,6 +63,7 @@ class Model:
                 self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
     def rest_batch_generate(self, batch_inputs, **gen_kwargs):
+        """Generate a batch of prompts using the remote inference client."""
         prompts, ids = batch_inputs
         results = [
             self.client.text_generation(prompt, **gen_kwargs) for prompt in prompts
@@ -57,6 +71,7 @@ class Model:
         return results, ids
 
     def batch_generate(self, batch_input, **gen_kwargs):
+        """Generate responses for a batch of tokenized prompts."""
         with torch.no_grad():
             for key in batch_input:
                 if torch.is_tensor(batch_input[key]):
@@ -81,6 +96,7 @@ class Model:
         n_samples=None,
         **gen_kwargs,
     ):
+        """Generate responses for the dataset in batches and save them for evaluation."""
         outputs = []
         dataset = PromptDataset(dataset_name, prompt_template_fn, n_samples=n_samples)
 

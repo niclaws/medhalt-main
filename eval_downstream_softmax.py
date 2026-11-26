@@ -1,3 +1,11 @@
+"""Evaluate downstream QA using a softmax-calibrated risk gate.
+
+This module reuses the original downstream data loading and checkpoint logic,
+then converts router risk to a smooth two-class gate. The gate probability
+scales the selected residual intervention for each sample; predictions and
+calibration details are saved for comparison with the hard-threshold baseline.
+"""
+
 from __future__ import annotations
 import argparse
 import gc
@@ -25,6 +33,7 @@ from softmax_eval_helpers import (
 
 
 def resolved_center(cfg: dict, args: argparse.Namespace) -> float:
+    """Choose the probability center used by this evaluation from configuration or command-line options."""
     if args.center_mode == "fixed":
         return float(args.center)
     tau = float(cfg["tau"])
@@ -37,6 +46,7 @@ def resolved_center(cfg: dict, args: argparse.Namespace) -> float:
 
 
 def auto_temperature(run_dir: Path, cfg: dict, router) -> float:
+    """Estimate a gate temperature using the saved validation examples."""
     features, wrong = [], []
     for task in cfg["selection_tasks"]:
         for _, b in checkpoint_split(run_dir, task, "validation"):
@@ -47,6 +57,7 @@ def auto_temperature(run_dir: Path, cfg: dict, router) -> float:
 
 
 def evaluate(engine, samples, cfg, vector, router, gate_cfg, batch_size):
+    """Score candidate answers with baseline, always-on, and gated intervention predictions."""
     rows, rejected = [], []
     active = bool(cfg["selected"])
     steerer = (
@@ -139,6 +150,7 @@ def evaluate(engine, samples, cfg, vector, router, gate_cfg, batch_size):
 
 
 def main():
+    """Parse command-line options and run this script’s configured workflow."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )

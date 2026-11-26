@@ -1,3 +1,10 @@
+"""Adapt router risk probabilities into per-example residual interventions.
+
+The module defines validated softmax gate settings, maps risk scores to
+continuous activation strengths, and wraps the causal engine so each example
+receives its own effective steering alpha while preserving candidate logits.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,11 +17,14 @@ import torch
 
 @dataclass(frozen=True)
 class SoftmaxGateConfig:
+    """Hold and validate the temperature, center, and numerical tolerance for the softmax gate."""
+
     temperature: float = 1.0
     center: float = 0.5
     epsilon: float = 1e-6
 
     def __post_init__(self) -> None:
+        """Reject invalid gate settings immediately after the configuration object is created."""
         if not math.isfinite(self.temperature) or self.temperature <= 0:
             raise ValueError("temperature must be finite and strictly positive")
         if not math.isfinite(self.center) or not 0 < self.center < 1:
@@ -25,6 +35,8 @@ class SoftmaxGateConfig:
 
 @dataclass(frozen=True)
 class SoftmaxGateResult:
+    """Store the gate probabilities and effective intervention strengths for a batch."""
+
     risk: float
     p_off: float
     p_on: float
@@ -63,6 +75,7 @@ def two_class_softmax(risks: Any, config: SoftmaxGateConfig) -> np.ndarray:
 def gate_from_risk(
     risk: float, alpha: float, config: SoftmaxGateConfig
 ) -> SoftmaxGateResult:
+    """Map a risk score to the probability and steering strength used for that example."""
     if not math.isfinite(alpha) or alpha < 0:
         raise ValueError("alpha must be finite and non-negative")
     off, on = map(float, two_class_softmax([risk], config)[0])
@@ -117,6 +130,7 @@ class ProbabilisticResidualSteerer:
         alpha: float,
         batch_size: int = 64,
     ):
+        """Store the model, data, or configuration needed by this object. See the assignments below for each setting."""
         from patching_engine import Intervention  # loaded only in actual model runs
 
         self.Intervention = Intervention
@@ -165,4 +179,5 @@ class ProbabilisticResidualSteerer:
         return scores[0]
 
     def run_always(self, state: Any) -> np.ndarray:
+        """Apply the selected layer intervention at its full configured strength."""
         return self.run(state, self.alpha)

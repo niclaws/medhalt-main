@@ -1,3 +1,9 @@
+"""Evaluate predictions stored in the benchmark's subset folder structure.
+
+``FullDataEvalSubset`` reads individual subset records, applies the matching
+task answer rule, and combines their counts into task and aggregate metrics.
+"""
+
 import pandas as pd
 import os
 import glob
@@ -6,9 +12,10 @@ import json
 
 
 class FullDataEvalSubset(object):
+    """Evaluate predictions organized into subset folders and combine their metrics."""
 
     def __init__(self, folder_name, correct_score=1, incorrect_score=-0.25):
-
+        """Store the model, data, or configuration needed by this object. See the assignments below for each setting."""
         self.correct_score = correct_score
         self.incorrect_score = incorrect_score
 
@@ -17,6 +24,7 @@ class FullDataEvalSubset(object):
         ]
 
     def read_json(self, file):
+        """Open a JSON file and return the decoded Python object."""
         try:
             with open(file, "rb") as json_file:
                 file_data = json.loads(json_file.read().decode("utf-8"))
@@ -25,15 +33,18 @@ class FullDataEvalSubset(object):
             print(f"JSONDecodeError: {e}")
 
     def evaluate_answer(self, predicted, correct):
+        """Compare prediction and reference text without treating letter case as meaningful."""
         return str(predicted.lower()) == str(correct.lower())
 
     def calculate_scores(self, df):
+        """Add a weighted score column to each row in the results DataFrame."""
         df["score"] = (
             df["correct"] * self.correct_score + df["wrong"] * self.incorrect_score
         ) / 100
         return df
 
     def create_dataframe(self, task_name, correct, wrong):
+        """Create a single-row DataFrame with the task name and outcome counts."""
         total = correct + wrong
         df_dict = {
             "task_name": [task_name],
@@ -44,11 +55,12 @@ class FullDataEvalSubset(object):
         return pd.DataFrame(df_dict)
 
     def handle_exceptions(self, task_name, sample, exception):
+        """Print the sample identifier and error, then return one exception for the count."""
         print(task_name, sample["id"], exception)
         return 1
 
     def reasoning_functional_eval(self, sample, task_name):
-
+        """Extract the predicted answer for a functional reasoning sample and compare it with the reference."""
         correct, wrong, exception_count = 0, 0, 0
         possible_keys = [
             "correct_answer",
@@ -90,7 +102,7 @@ class FullDataEvalSubset(object):
         return self.create_dataframe(task_name, correct, wrong)
 
     def IR_pmid2title_pubmedlink2title_eval(self, sample, task_name):
-
+        """Extract the predicted paper title and compare it with the reference title."""
         correct = wrong = exception_count = 0
 
         try:
@@ -105,6 +117,7 @@ class FullDataEvalSubset(object):
         return self.create_dataframe(task_name, correct, wrong)
 
     def IR_title2pubmedlink_abstract2pubmedlink_eval(self, sample, task_name):
+        """Extract the predicted PubMed URL and compare it with the reference URL."""
         correct = wrong = exception_count = 0
         try:
             predicted_url = eval(str(sample["gpt_output"]))["url"]
@@ -118,6 +131,7 @@ class FullDataEvalSubset(object):
         return self.create_dataframe(task_name, correct, wrong)
 
     def reasoning_nota_eval(self, sample, task_name):
+        """Check whether the model’s NOTA response matches the expected answer."""
         correct = wrong = exception_count = 0
         try:
             predicted_answer = eval(str(sample["gpt_output"]))["cop"]
@@ -133,6 +147,7 @@ class FullDataEvalSubset(object):
         return self.create_dataframe(task_name, correct, wrong)
 
     def reasoning_fake_eval(self, sample, task_name):
+        """Check whether the response appropriately rejects or identifies a fabricated question."""
         correct = wrong = exception_count = 0
         try:
             predicted_answer = str(eval(str(sample["gpt_output"]))["cop"]).lower()
@@ -165,6 +180,7 @@ class FullDataEvalSubset(object):
         return self.create_dataframe(task_name, correct, wrong)
 
     def correct_df(self, row):
+        """Convert legacy model prefixes in a task name into a clean task and model name."""
         if "vinci" in row["task_name"]:
             row["task_name"] = row["task_name"].split("vinci_")[1]
             row["model_name"] = "Davinci"
@@ -174,7 +190,7 @@ class FullDataEvalSubset(object):
         return row
 
     def finalise_dataframe(self, df):
-
+        """Calculate accuracy, precision, recall, and F1, then normalize task labels."""
         df["accuracy"] = (df["correct"] / df["total"] * 100).round(3)
         df["precision"] = df["correct"] / (df["correct"] + df["wrong"])
         df["recall"] = df["correct"] / df["total"]
@@ -188,6 +204,7 @@ class FullDataEvalSubset(object):
 
     def sum_and_avg(self, df):
         # calculate sum for 'total', 'correct', 'wrong' and avg for 'accuracy', 'precision', 'recall', 'f1_score'
+        """Append a final row containing summed counts and mean performance metrics."""
         df_sum = df.sum(numeric_only=True)
         df_avg = df[["accuracy", "precision", "recall", "f1_score", "score"]].mean()
 
@@ -209,6 +226,7 @@ class FullDataEvalSubset(object):
         return df
 
     def run_all_evaluations_full(self):
+        """Evaluate all files in all discovered subset folders."""
         eval_dict = {
             "IR_pmid2title": self.IR_pmid2title_pubmedlink2title_eval,
             "IR_abstract2pubmedlink": self.IR_title2pubmedlink_abstract2pubmedlink_eval,

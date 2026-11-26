@@ -1,0 +1,5 @@
+# Install only these additional dependencies into the existing working environment.
+# Use your original requirements.txt for the rest; do NOT upgrade a working legacy model env unnecessarily.
+scikit-learn>=1.3,<2
+matplotlib>=3.7,<4
+packaging>=23

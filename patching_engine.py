@@ -1,3 +1,11 @@
+"""Model execution and activation-patching primitives for Med-HALT.
+
+``CausalEngine`` loads a causal language model and exposes prompt preparation,
+component capture, candidate scoring, and intervention runs. The small data
+classes describe cached run state and requested component/residual edits;
+similarity helpers support comparing the resulting representations.
+"""
+
 from __future__ import annotations
 
 import math
@@ -12,10 +20,12 @@ from zoneinfo import ZoneInfo
 
 
 def now() -> str:
+    """Return the current timestamp used in run logs."""
     return datetime.now()
 
 
 def log(msg: str) -> None:
+    """Print a consistently formatted message for experiment progress."""
     print(f"[{now()}] {msg}", flush=True)
 
 
@@ -29,37 +39,48 @@ def log(msg: str) -> None:
 
 @dataclass(frozen=True)
 class ComponentSpace:
+    """Translate between flattened component IDs and their layer, head, or MLP locations."""
+
     num_layers: int
     num_heads: int
 
     @property
     def per_layer(self) -> int:
+        """Return the number of components available in each layer."""
         return self.num_heads + 1
 
     @property
     def size(self) -> int:
+        """Return the total number of components represented by this space."""
         return self.num_layers * self.per_layer
 
     def head(self, layer: int, head: int) -> int:
+        """Return the attention-head index for this component."""
         return layer * self.per_layer + head
 
     def mlp(self, layer: int) -> int:
+        """Return the MLP component index for this component."""
         return layer * self.per_layer + self.num_heads
 
     def layer_of(self, idx) -> np.ndarray:
+        """Return the layer index containing this component."""
         return np.asarray(idx) // self.per_layer
 
     def is_mlp(self, idx) -> np.ndarray:
+        """Check whether this component represents an MLP."""
         return (np.asarray(idx) % self.per_layer) == self.num_heads
 
     def label(self, idx: int) -> str:
+        """Return a readable name for this component."""
         l, r = divmod(int(idx), self.per_layer)
         return f"L{l}MLP" if r == self.num_heads else f"L{l}H{r}"
 
     def labels(self, idxs: Sequence[int]) -> List[str]:
+        """Return readable names for all components."""
         return [self.label(i) for i in idxs]
 
     def heads_in_layer(self, layer: int) -> np.ndarray:
+        """Return the attention-head components in the requested layer."""
         return np.arange(self.num_heads) + layer * self.per_layer
 
 
@@ -122,6 +143,8 @@ def vocab_stats(logits: torch.Tensor) -> np.ndarray:
 
 
 class CausalEngine:
+    """Load the model and provide methods for prompt scoring, activation capture, and interventions."""
+
     def __init__(
         self,
         model_name: str,
@@ -130,6 +153,7 @@ class CausalEngine:
         device: Optional[str] = None,
         attn_implementation: Optional[str] = None,
     ):
+        """Store the model, data, or configuration needed by this object. See the assignments below for each setting."""
         self.model_name = model_name
         log(f"[Engine] Loading tokenizer {model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -144,7 +168,7 @@ class CausalEngine:
             "float32": torch.float32,
         }[dtype]
         if device is None:
-            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            device = "auto"
         self.device = torch.device(device)
         import transformers
         from packaging import version
@@ -199,6 +223,7 @@ class CausalEngine:
 
     # ------------------------------------------------------------------
     def _find_layers(self) -> torch.nn.ModuleList:
+        """Locate the transformer decoder layers inside the loaded model."""
         for path in [
             ("model", "layers"),
             ("model", "language_model", "layers"),
@@ -252,6 +277,7 @@ class CausalEngine:
 
     def encode(self, text: str) -> List[int]:
         # The rendered template already contains BOS where the model expects it.
+        """Tokenize text into model token IDs."""
         return self.tokenizer(text, add_special_tokens=False)["input_ids"]
 
     def continuation_ids(
@@ -269,6 +295,7 @@ class CausalEngine:
     # ------------------------------------------------------------------
     @staticmethod
     def _cache_to_list(cache) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """Convert the model cache into a list that can be indexed by layer."""
         if isinstance(cache, (list, tuple)):
             return [(k, v) for k, v in cache]
         if hasattr(cache, "layers"):  # transformers >= 4.56 layered cache
@@ -280,6 +307,7 @@ class CausalEngine:
         raise TypeError(f"Unsupported cache type {type(cache)}")
 
     def _expanded_cache(self, kv: List[Tuple[torch.Tensor, torch.Tensor]], batch: int):
+        """Expand cached key/value tensors to match a batch of candidate continuations."""
         from transformers import DynamicCache
 
         cache = DynamicCache()
@@ -311,20 +339,29 @@ class CausalEngine:
         handles = []
 
         def zhook(l):
+            """Create a pre-hook that saves the attention output projection input at the final token."""
+
             def f(mod, args):
+                """Save the activation at the hooked module’s final token into its layer slot."""
                 z[l] = args[0][0, -1].detach()
 
             return f
 
         def mhook(l):
+            """Create a hook that saves the MLP output at the final token."""
+
             def f(mod, inp, outp):
+                """Save the activation at the hooked module’s final token into its layer slot."""
                 o = outp[0] if isinstance(outp, tuple) else outp
                 mlp[l] = o[0, -1].detach()
 
             return f
 
         def rhook(l):
+            """Create a hook that saves the transformer layer output at the final token."""
+
             def f(mod, inp, outp):
+                """Save the activation at the hooked module’s final token into its layer slot."""
                 o = outp[0] if isinstance(outp, tuple) else outp
                 resid[l] = o[0, -1].detach()
 
@@ -389,6 +426,7 @@ class CausalEngine:
     # Batched interventions
     # ------------------------------------------------------------------
     def _build_masks(self, ivs: Sequence[Intervention]):
+        """Build token masks that distinguish prompt tokens from candidate continuation tokens."""
         B, L, H = len(ivs), self.num_layers, self.num_heads
         P = np.zeros((B, self.space.size), dtype=bool)
         S = np.zeros((B, self.space.size), dtype=np.float32)
@@ -455,6 +493,7 @@ class CausalEngine:
         batch_size,
         steer_resid=None,
     ):
+        """Score candidate answers after applying one or more activation interventions."""
         results = []
         H, d = self.num_heads, self.head_dim
         for start in range(0, len(interventions), batch_size):
@@ -573,6 +612,7 @@ class CausalEngine:
     def _full_forward_with_last_patch(
         self, input_ids, cand_ids, source=None, patch=(), resid=None
     ):
+        """Run the model over the full token sequence while replacing selected final-position activations."""
         ids = torch.tensor([list(input_ids)], dtype=torch.long, device=self.device)
         H, d = self.num_heads, self.head_dim
         handles = []
@@ -786,6 +826,7 @@ class CausalEngine:
 
 
 def _center_gram(K: torch.Tensor) -> torch.Tensor:
+    """Center a Gram matrix so it represents deviations from the feature mean."""
     n = K.shape[0]
     H = torch.eye(n, dtype=K.dtype) - 1.0 / n
     return H @ K @ H
@@ -829,6 +870,7 @@ def paired_linear_cka(X: torch.Tensor, Y: torch.Tensor, debiased: bool = True) -
 
 
 def cosine(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Calculate cosine similarity between two vectors."""
     a = a.double().flatten()
     b = b.double().flatten()
     na, nb = a.norm(), b.norm()

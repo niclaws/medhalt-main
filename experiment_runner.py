@@ -1,3 +1,11 @@
+"""Core experiment pipeline for causal steering and hallucination analysis.
+
+This module prepares paired model runs, computes representation-level
+steering vectors, searches layers and circuits, calibrates risk routers, and
+measures intervention outcomes. It also contains generation auditing and
+statistical summary helpers used by the safe-layer evaluation scripts.
+"""
+
 from __future__ import annotations
 
 import json
@@ -29,11 +37,13 @@ CLIP = 2.0  # clipping for normalized effects inside calibration objectives
 
 
 def logit_diff(rows: np.ndarray, halluc_idx: int) -> np.ndarray:
+    """For each score row, subtract the hallucination-option score from the designated correct-option score."""
     rows = np.atleast_2d(rows)
     return rows[:, 0] - rows[:, halluc_idx]
 
 
 def is_correct(rows: np.ndarray, gold: int = 0) -> np.ndarray:
+    """Return a Boolean for each score row indicating whether the gold option wins."""
     rows = np.atleast_2d(rows)
     return rows.argmax(axis=1) == gold
 
@@ -50,6 +60,7 @@ def run_gold(pair: Dict, run_type: str) -> int:
 
 
 def prepare_pair(engine: CausalEngine, pair: Dict) -> Tuple[RunState, RunState]:
+    """Score both the clean and corrupt prompt versions and retain their model states for later interventions."""
     sc = engine.prepare(pair["corrupt_ids"], pair["cand_ids"])
     so = engine.prepare(pair["clean_ids"], pair["cand_ids"])
     return sc, so
@@ -131,6 +142,7 @@ def compute_steering_vectors(
 
 
 def _vec_to_device(vectors, engine):
+    """Move the steering vectors onto the model device in the format expected by the engine."""
     return vectors["z"].to(engine.device), vectors["mlp"].to(engine.device)
 
 
@@ -216,6 +228,7 @@ def component_scores(
 
 
 def topk(score: np.ndarray, k: int) -> np.ndarray:
+    """Return the indices of the k largest scores."""
     return np.argsort(-score, kind="stable")[:k]
 
 
@@ -231,6 +244,7 @@ def contiguous_window(signal: np.ndarray, k: int) -> np.ndarray:
 def random_circuit(
     C: int, k: int, rng: np.random.Generator, exclude: Sequence[int]
 ) -> np.ndarray:
+    """Sample component IDs without replacement to create a random baseline circuit."""
     pool = np.setdiff1d(np.arange(C), np.asarray(exclude))
     if len(pool) < k:
         pool = np.arange(C)
@@ -293,6 +307,7 @@ def layer_matched_circuit(
 def harm_aware_scores(
     scores: Dict[str, np.ndarray], regime: str, lam: float
 ) -> np.ndarray:
+    """Rank candidate interventions while accounting for possible harm to guard examples."""
     if regime == "patch":
         return scores["R_patch"] - lam * scores["H_patch"]
     return scores["R_steer"] - lam * scores["H_steer"]
@@ -350,6 +365,7 @@ def evaluate_circuits_on_pairs(
 
 
 def calibration_objective(res: Dict[str, np.ndarray], regime: str) -> np.ndarray:
+    """Combine validation gains and, for steering, clean-example harm into the score used to choose settings."""
     g = np.clip(res["gain"], -CLIP, CLIP).mean(0)
     if regime == "patch":
         return g
@@ -543,6 +559,7 @@ class RiskRouter:
         l2: float = 1.0,
         mode: str = "vocab",
     ):
+        """Store the model, data, or configuration needed by this object. See the assignments below for each setting."""
         if mode not in ("vocab", "candidate"):
             raise ValueError(mode)
         self.layers = list(layers)
@@ -553,6 +570,7 @@ class RiskRouter:
 
     @staticmethod
     def _cand_feats(cand_logits: np.ndarray) -> np.ndarray:
+        """Build the candidate-answer features used by the risk router."""
         s = np.sort(cand_logits)[::-1]
         p = np.exp(cand_logits - cand_logits.max())
         p = p / p.sum()
@@ -561,6 +579,7 @@ class RiskRouter:
         return np.array([margin, ent, float(p.max()) * len(p)], dtype=np.float64)
 
     def _raw(self, feats: Sequence[Dict]) -> np.ndarray:
+        """Calculate the router’s uncalibrated risk score from feature values."""
         rows = []
         for f in feats:
             parts = [f["vocab_stats"]]
@@ -574,6 +593,7 @@ class RiskRouter:
         return np.stack(rows)
 
     def fit(self, feats: Sequence[Dict], wrong: np.ndarray):
+        """Train the router using feature examples and their correct or incorrect labels."""
         self.mu, self.pcs = [], []
         for l in self.layers:
             X = torch.stack([f["resid"][l].double() for f in feats]).numpy()
@@ -591,6 +611,7 @@ class RiskRouter:
         opt = torch.optim.LBFGS([w, b], max_iter=200, line_search_fn="strong_wolfe")
 
         def closure():
+            """Calculate the logistic-regression loss and gradient for the optimizer."""
             opt.zero_grad()
             z = X @ w + b
             loss = torch.nn.functional.binary_cross_entropy_with_logits(
@@ -609,6 +630,7 @@ class RiskRouter:
         return self
 
     def predict(self, feats: Sequence[Dict]) -> np.ndarray:
+        """Return a risk score for each supplied feature record."""
         if not len(feats):
             return np.zeros(0)
         F = (self._raw(feats) - self.fm) / self.fs
@@ -625,6 +647,7 @@ class RiskRouter:
         return best_tau
 
     def state_dict(self):
+        """Return the router settings and learned parameters in a serializable dictionary."""
         return {
             k: getattr(self, k)
             for k in [
@@ -644,6 +667,7 @@ class RiskRouter:
 
     @classmethod
     def from_state(cls, d):
+        """Rebuild a router from a previously saved state dictionary."""
         r = cls(d["layers"], d["n_pca"], d["l2"], d.get("mode", "vocab"))
         for k, v in d.items():
             setattr(r, k, v)
@@ -651,6 +675,7 @@ class RiskRouter:
 
 
 def default_router_layers(num_layers: int) -> List[int]:
+    """Choose the default set of layers whose activations feed the risk router."""
     return sorted({num_layers // 4, num_layers // 2, (3 * num_layers) // 4})
 
 
@@ -1021,12 +1046,14 @@ UNVERIFIABLE_LABELS = {"wrong_pmid_unverified", "unmatched_title"}
 
 
 def _title_tokens(s: str) -> set:
+    """Normalize a title and return its distinct word tokens for matching."""
     import re
 
     return {w for w in re.findall(r"[a-z0-9]+", str(s).lower()) if len(w) > 2}
 
 
 def _f1(a: set, b: set) -> float:
+    """Measure title similarity with the harmonic mean of token precision and recall."""
     if not a or not b:
         return 0.0
     c = len(a & b)
@@ -1169,6 +1196,7 @@ def audit_sheet(gen: pd.DataFrame, n_per_cell: int, seed: int) -> pd.DataFrame:
 
 
 def _collapse(lbl: str) -> str:
+    """Group detailed reviewer labels into the broader categories used in agreement analysis."""
     if lbl == "correct":
         return "correct"
     if lbl in INCORRECT_LABELS or lbl == "incorrect":
@@ -1277,6 +1305,7 @@ def representation_analysis(
 def bootstrap_ci(
     x: np.ndarray, n_boot: int, seed: int, conf: float = 0.95
 ) -> Tuple[float, float]:
+    """Estimate a confidence interval by resampling the observed values."""
     x = np.asarray(x, dtype=float)
     x = x[np.isfinite(x)]
     if len(x) < 2 or n_boot <= 0:
@@ -1302,6 +1331,7 @@ def sign_flip_p(diff: np.ndarray, n_perm: int, seed: int) -> float:
 
 
 def holm(pvals: Sequence[float]) -> List[float]:
+    """Adjust multiple p-values with the Holm step-down procedure."""
     p = np.asarray(pvals, dtype=float)
     order = np.argsort(p)
     m = len(p)
@@ -1364,6 +1394,8 @@ def summarize(
             "median_norm_gain": gx.norm_gain.median(),
             "gain_ci_low": lo,
             "gain_ci_high": hi,
+            # Each accuracy is the fraction of correct flags in that subset.
+            # Its denominator is the number of evaluated rows in gx or gc.
             "acc_corrupt_base": gx.correct_base.mean(),
             "acc_corrupt_after": gx.correct_after.mean(),
             "n_hallucinated": len(hallu),
@@ -1480,6 +1512,7 @@ def summarize(
 
 
 def _spearman(a: np.ndarray, b: np.ndarray) -> float:
+    """Measure whether two arrays have a monotonic rank relationship."""
     if len(a) < 3 or np.std(a) == 0 or np.std(b) == 0:
         return np.nan
     ra = pd.Series(a).rank().values
@@ -1554,6 +1587,7 @@ def make_plots(
     scores_by_task: Dict[str, Dict],
     space: ComponentSpace,
 ):
+    """Save figures that summarize experiment and representation-analysis results."""
     import matplotlib
 
     matplotlib.use("Agg")

@@ -1,3 +1,10 @@
+"""Evaluate softmax risk gating on generated answer outputs.
+
+The entry point loads selected checkpoints and router calibration, generates
+baseline and gated responses from the target model, and stores sample-level
+generation results for later factuality and safety audits.
+"""
+
 from __future__ import annotations
 import argparse
 import json
@@ -13,6 +20,7 @@ from experiment_runner import router_features
 
 
 def main():
+    """Parse command-line options and run this script’s configured workflow."""
     a = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )

@@ -1,3 +1,10 @@
+"""Score complete prediction folders against Med-HALT reference records.
+
+``FullDataEval`` dispatches each task to its task-specific answer extractor,
+counts correct, incorrect, and malformed outputs, then returns per-task
+accuracy, precision, recall, F1, and weighted score columns.
+"""
+
 import pandas as pd
 import glob
 from tqdm import tqdm
@@ -5,8 +12,10 @@ import json
 
 
 class FullDataEval(object):
+    """Evaluate complete prediction files and calculate task-level performance metrics."""
 
     def __init__(self, folder_name, correct_score=1, incorrect_score=-0.25):
+        """Store the model, data, or configuration needed by this object. See the assignments below for each setting."""
         self.evaluations = []
         self.all_files = {
             k.split(".json")[-2].split("/")[2]: k
@@ -17,14 +26,17 @@ class FullDataEval(object):
         self.incorrect_score = incorrect_score
 
     def read_json(self, file):
+        """Open a JSON file and return the decoded Python object."""
         with open(file, "r") as json_file:
             file_data = json.load(json_file)
         return file_data
 
     def evaluate_answer(self, predicted, correct):
+        """Compare prediction and reference text without treating letter case as meaningful."""
         return str(predicted.lower()) == str(correct.lower())
 
     def create_dataframe(self, task_name, correct, wrong, score):
+        """Create a single-row DataFrame with the task name and outcome counts."""
         total = correct + wrong
         df_dict = {
             "task_name": [task_name],
@@ -36,13 +48,16 @@ class FullDataEval(object):
         return pd.DataFrame(df_dict)
 
     def handle_exceptions(self, task_name, sample, exception):
+        """Print the sample identifier and error, then return one exception for the count."""
         print(task_name, sample["id"], exception)
         return 1
 
     def calculate_score(self, correct, wrong):
+        """Apply the configured correct and incorrect weights to compute a task score."""
         return (correct * self.correct_score + wrong * self.incorrect_score) / 100
 
     def reasoning_functional_eval(self, data, task_name):
+        """Extract the predicted answer for a functional reasoning sample and compare it with the reference."""
         correct, wrong, exception_count = 0, 0, 0
         all_files_data = self.read_json(self.all_files[data])
 
@@ -89,6 +104,7 @@ class FullDataEval(object):
         return self.create_dataframe(task_name, correct, wrong, score)
 
     def IR_pmid2title_pubmedlink2title_eval(self, data, task_name):
+        """Extract the predicted paper title and compare it with the reference title."""
         correct = wrong = exception_count = 0
         all_files_data = self.read_json(self.all_files[data])
 
@@ -110,6 +126,7 @@ class FullDataEval(object):
         return self.create_dataframe(task_name, correct, wrong, score)
 
     def IR_title2pubmedlink_abstract2pubmedlink_eval(self, data, task_name):
+        """Extract the predicted PubMed URL and compare it with the reference URL."""
         correct = wrong = exception_count = 0
         all_files_data = self.read_json(self.all_files[data])
 
@@ -129,6 +146,7 @@ class FullDataEval(object):
         return self.create_dataframe(task_name, correct, wrong, score)
 
     def reasoning_nota_eval(self, data, task_name):
+        """Check whether the model’s NOTA response matches the expected answer."""
         correct = wrong = exception_count = 0
         all_files_data = self.read_json(self.all_files[data])
 
@@ -150,6 +168,7 @@ class FullDataEval(object):
         return self.create_dataframe(task_name, correct, wrong, score)
 
     def reasoning_fake_eval(self, data, task_name):
+        """Check whether the response appropriately rejects or identifies a fabricated question."""
         correct = wrong = exception_count = 0
         all_files_data = self.read_json(self.all_files[data])
 
@@ -187,6 +206,7 @@ class FullDataEval(object):
         return self.create_dataframe(task_name, correct, wrong, score)
 
     def correct_df(self, row):
+        """Convert legacy model prefixes in a task name into a clean task and model name."""
         if "vinci" in row["task_name"]:
             row["task_name"] = row["task_name"].split("vinci_")[1]
             row["model_name"] = "Davinci"
@@ -196,6 +216,7 @@ class FullDataEval(object):
         return row
 
     def finalise_dataframe(self, df):
+        """Calculate accuracy, precision, recall, and F1, then normalize task labels."""
         df["accuracy"] = (df["correct"] / df["total"] * 100).round(3)
         df["precision"] = df["correct"] / (df["correct"] + df["wrong"])
         df["recall"] = df["correct"] / df["total"]
@@ -206,7 +227,7 @@ class FullDataEval(object):
         return df
 
     def run_all_evaluations(self):
-
+        """Evaluate every prediction file found in the configured folder."""
         eval_dict = {
             "vinci_IR_pmid2title": self.IR_pmid2title_pubmedlink2title_eval,
             "vinci_reasoning_nota": self.reasoning_nota_eval,

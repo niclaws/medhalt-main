@@ -1,3 +1,12 @@
+"""Evaluate selected Med-HALT steering configurations on medical QA datasets.
+
+The workflow reloads discovery examples to rebuild the selected steering vector
+and risk router, scores candidate answers by their first differing token, and
+compares baseline, always-steered, and risk-gated predictions. Results include
+paired bootstrap intervals and exact McNemar tests; malformed candidate token
+alignments are recorded as rejected samples rather than silently mis-scored.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -50,6 +59,7 @@ def load_samples(
     n: int,
     sample_seed: int,
 ) -> list[dict]:
+    """Load and format a reproducible sample of examples from the named dataset."""
     repo, config, split, answers = DATASETS[name]
 
     if config:
@@ -114,6 +124,7 @@ def _load_checkpoint(
     run_dir: Path,
     task: str,
 ) -> list[dict]:
+    """Load the saved paired examples and baseline activations for one task."""
     state = run_dir / "state"
 
     pairs_file = state / f"pairs_{task}.pt"
@@ -125,13 +136,13 @@ def _load_checkpoint(
 
     pairs = torch.load(
         pairs_file,
-        map_location="cpu",
+        map_location="auto",
         weights_only=False,
     )["pairs"]
 
     base = torch.load(
         base_file,
-        map_location="cpu",
+        map_location="auto",
         weights_only=False,
     )
 
@@ -162,6 +173,7 @@ def get_selection(
     protocol: str,
     target: str,
 ) -> dict:
+    """Read and validate the selected protocol and target configuration."""
     path = run_dir / "safe_layer" / "safe_layer_selection.csv"
 
     if not path.exists():
@@ -352,7 +364,7 @@ def evaluate(
     router: RiskRouter | None,
     batch_size: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-
+    """Score candidate answers with baseline, always-on, and gated intervention predictions."""
     rows = []
     rejected = []
 
@@ -469,7 +481,7 @@ def paired_bootstrap_interval(
     seed: int,
     reps: int,
 ) -> tuple[float, float]:
-
+    """Estimate a confidence interval for paired accuracy changes using bootstrap resampling."""
     diff = correct_after.astype(np.float64) - correct_base.astype(np.float64)
 
     rng = np.random.default_rng(seed)
@@ -498,7 +510,7 @@ def summarize(
     bootstrap_seed: int,
     n_boot: int,
 ) -> dict:
-
+    """Calculate the main accuracy, intervention, and statistical summary metrics."""
     cb = df.correct_base.to_numpy(dtype=bool)
 
     result = {
@@ -564,6 +576,7 @@ def summarize(
 
 
 def main() -> None:
+    """Parse command-line options and run this script’s configured workflow."""
     ap = argparse.ArgumentParser(description=__doc__)
 
     ap.add_argument(

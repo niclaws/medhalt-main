@@ -1,3 +1,10 @@
+"""Load benchmark examples and assemble task-specific few-shot prompts.
+
+The formatters convert retrieval and reasoning records to a shared prompt
+shape; sampling helpers choose demonstrations and construct the final prompt
+or dataset used by the model wrapper.
+"""
+
 import pandas as pd
 import json
 import random
@@ -8,6 +15,7 @@ DATASETS_FOLDER = os.path.join(CURRENT_FOLDER, "../datasets")
 
 
 def read_json_(file):
+    """Open a JSON file and return its decoded contents."""
     with open(file, "r") as json_file:
         file_js = json.load(json_file)
     return file_js
@@ -36,6 +44,7 @@ data_dict = {
 
 
 def Nota_format(data_):
+    """Turn one NOTA record into the prompt fields and expected answer used by the model."""
     data_["prompt"] = data_.apply(
         lambda row: "Input: "
         + str({"Question": row["question"], "Options": eval(row["options"])})
@@ -46,6 +55,7 @@ def Nota_format(data_):
 
 
 def pmid2title_format(data_):
+    """Turn a PMID lookup record into the prompt and expected title."""
     data_["prompt"] = data_.apply(
         lambda row: "Input: " + str({"Pmid": str(int(row["PMID"]))}), axis=1
     )
@@ -54,6 +64,7 @@ def pmid2title_format(data_):
 
 
 def abs2pub_format(data_):
+    """Turn an abstract lookup record into the prompt and expected PubMed link."""
     data_["prompt"] = data_.apply(
         lambda row: "Input: " + str({"paper_abstract": str(row["Abstract"])}), axis=1
     )
@@ -62,6 +73,7 @@ def abs2pub_format(data_):
 
 
 def url2title_format(data_):
+    """Turn a PubMed link record into the prompt and expected paper title."""
     data_["prompt"] = data_.apply(
         lambda row: "Input: " + str({"url": str(row["url"])}), axis=1
     )
@@ -70,6 +82,7 @@ def url2title_format(data_):
 
 
 def title2pub_format(data_):
+    """Turn a paper title record into the prompt and expected PubMed link."""
     data_["prompt"] = data_.apply(
         lambda row: "Input: " + str({"paper_title": str(row["Title"])}), axis=1
     )
@@ -78,7 +91,7 @@ def title2pub_format(data_):
 
 
 def get_samples(dataset_name, shots, prompt_version):
-
+    """Load task records and choose the requested number of few-shot examples."""
     prompt = get_full_prompt(dataset_name, shots, prompt_version)
     dataset = load_dataset(dataset_name)
     dataset["prompt"] = dataset["prompt"].apply(lambda x: prompt + str(x))
@@ -88,7 +101,7 @@ def get_samples(dataset_name, shots, prompt_version):
 
 
 def load_dataset(dataset_name):
-
+    """Load a task’s records from its configured dataset file."""
     df = pd.read_csv(os.path.join(DATASETS_FOLDER, data_dict[dataset_name]))
     if dataset_name == "Nota" or dataset_name == "FCT" or dataset_name == "fake":
         df = Nota_format(df)
@@ -108,7 +121,7 @@ def load_dataset(dataset_name):
 
 
 def prompt_data(prompt_name, version, n_shots):
-
+    """Build the task prompt and demonstration examples for the chosen prompt version."""
     prompt = read_json_(
         f"{os.path.join(CURRENT_FOLDER,prompt_dict[prompt_name],'prompts.json')}"
     )["prompts"]
@@ -157,6 +170,7 @@ def prompt_data(prompt_name, version, n_shots):
 
 
 def get_full_prompt(prompt_name, n_shots=2, version="v0"):
+    """Combine the task instructions and few-shot examples into one prompt string."""
     prompt = prompt_data(prompt_name, version, n_shots)
     if prompt["shots"] == None:
         return (
@@ -178,7 +192,7 @@ def get_full_prompt(prompt_name, n_shots=2, version="v0"):
 
 
 def get_sample_Dataset(n_shots, version):
-
+    """Create a prompt dataset from the selected examples and prompt version."""
     df = pd.read_csv(os.path.join(DATASETS_FOLDER, "data_sample.csv"))
     df_d = df.to_dict("records")
     print("before_shape", len(df_d))

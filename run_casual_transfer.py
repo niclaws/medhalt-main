@@ -1,3 +1,11 @@
+"""Build and run causal-transfer experiments across Med-HALT task types.
+
+The script loads benchmark records, forms matched clean/corrupt or
+retrieval-answer pairs, validates their labels, and splits them into discovery,
+validation, and test partitions. It then resumes or creates model checkpoints,
+runs the shared experiment pipeline, and aggregates per-run outputs.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -49,6 +57,7 @@ MCQ_INSTRUCTION = (
 
 
 def load_raw(name: str, source: str, data_dir: Optional[str]) -> List[Dict]:
+    """Read task examples from a local file or the configured Hugging Face dataset."""
     if source == "medhalt":
         from medhalt.prompts.utils import get_samples
 
@@ -88,6 +97,7 @@ def parse_options(value) -> List[str]:
 
 
 def as_int(x) -> Optional[int]:
+    """Return an integer when the supplied value can be converted; otherwise return None."""
     try:
         if x is None or (isinstance(x, float) and np.isnan(x)):
             return None
@@ -97,6 +107,7 @@ def as_int(x) -> Optional[int]:
 
 
 def render_options(opts: Sequence[str]) -> str:
+    """Format options as separate lines labeled A, B, C, and so on."""
     return "\n".join(f"{LETTERS[i]}) {o}" for i, o in enumerate(opts))
 
 
@@ -134,6 +145,7 @@ def finalize_pair(
         return {"reject": "answer_tokenization_mismatch"}
 
     def cp(a, b):
+        """Count the shared prefix tokens at the start of two answer token sequences."""
         n = 0
         while n < min(len(a), len(b)) and a[n] == b[n]:
             n += 1
@@ -180,6 +192,7 @@ def finalize_pair(
 def build_mcq_pairs(
     engine, task: str, rows: List[Dict], n: int, rng: random.Random, stats: Dict
 ) -> List[Dict]:
+    """Create clean and corrupted versions of multiple-choice examples with aligned answer labels."""
     rows = list(rows)
     rng.shuffle(rows)
     pairs = []
@@ -294,6 +307,7 @@ def build_retrieval_pairs(
     rng: random.Random,
     stats: Dict,
 ) -> List[Dict]:
+    """Create matched correct and corrupted examples for the selected retrieval task."""
     real = []
     seen = set()
     for r in rows:
@@ -382,6 +396,12 @@ def reference_corpus(rows: List[Dict]) -> Dict:
 
 
 def validate(pair: Dict, b: Dict, min_denom: float, min_margin: float) -> Dict:
+    """Decide whether a clean/corrupt pair is suitable for the filtered analysis.
+
+    A pair must have a correct clean answer and a strong enough clean-vs-corrupt
+    score margin. Counterfactual pairs also need the expected corrupt answer.
+    The returned ``valid`` flag is a pair-inclusion decision, not an accuracy.
+    """
     h = b["halluc_idx"]
     denom = b["d_clean"] - b["d_corrupt"]
     info = {
@@ -420,6 +440,7 @@ def validate(pair: Dict, b: Dict, min_denom: float, min_margin: float) -> Dict:
 def stratified_split(
     items: List[int], strata: List[bool], fracs, rng: np.random.Generator
 ):
+    """Assign examples to data splits while preserving the proportions of relevant groups."""
     out = {"discovery": [], "validation": [], "test": []}
     for s in (True, False):
         idx = [i for i, z in zip(items, strata) if z == s]
@@ -441,6 +462,7 @@ def stratified_split(
 
 
 def ckpt(path: str, resume: bool, fn):
+    """Reuse a saved result when requested, or compute the result and write a new checkpoint."""
     if resume and os.path.exists(path):
         log(f"[resume] loading {os.path.basename(path)}")
         return torch.load(path, weights_only=False)
@@ -452,6 +474,7 @@ def ckpt(path: str, resume: bool, fn):
 
 
 def ckpt_df(path: str, resume: bool, fn):
+    """Reuse a saved table when requested, or compute and save the DataFrame result."""
     if resume and os.path.exists(path):
         log(f"[resume] loading {os.path.basename(path)}")
         return pd.read_csv(path)
@@ -479,6 +502,7 @@ def read_csv_safe(path: str) -> pd.DataFrame:
 
 
 def aggregate(dirs: List[str], out: str):
+    """Read outputs from run folders and combine them into aggregate result files."""
     os.makedirs(out, exist_ok=True)
     for rel, keys, metrics in [
         (
@@ -612,6 +636,7 @@ STATE_VERSION = "4"
 
 
 def main():
+    """Parse command-line options and run this script’s configured workflow."""
     ap = argparse.ArgumentParser(
         description="Med-HALT causal transfer + safe-layer hallucination mitigation"
     )
@@ -904,6 +929,10 @@ def main():
         valid_idx = [
             i for i, inf in enumerate(infos) if inf["valid"] and i not in unf_set
         ][: args.max_pairs_per_task]
+        # The conditioned splits contain only pairs that passed `validate`;
+        # because that filter requires correct_clean, their clean accuracy is
+        # 100% by construction. The unfiltered split shows clean accuracy
+        # before this correctness-based filtering is applied.
         strata = [infos[i]["hallucinated"] for i in valid_idx]
         sp = stratified_split(valid_idx, strata, args.split_fracs, split_rng)
         sp["unfiltered"] = unf_idx
@@ -921,6 +950,8 @@ def main():
         pool = [i for i in range(len(infos)) if i not in unf_set]
 
         def acc(idx, kind):
+            # Accuracy is the mean of the correct/incorrect flags for the
+            # requested examples; filtered-out pairs are absent from `idx`.
             return (
                 float(np.mean([b[i][f"correct_{kind}"] for i in idx]))
                 if idx
@@ -986,9 +1017,11 @@ def main():
     unf_tasks = [t for t in args.tasks if splits[t]["unfiltered"]]
 
     def sub(task, split):
+        """Return the pair records assigned to the requested task and split."""
         return [pairs[task][i] for i in splits[task][split]]
 
     def subbase(task, split):
+        """Return the cached baseline records assigned to the requested task and split."""
         return [base[task][i] for i in splits[task][split]]
 
     # =================================================================
@@ -1751,6 +1784,7 @@ def main():
 
 
 def _has_parquet() -> bool:
+    """Return whether pandas can read and write Parquet files in this environment."""
     try:
         import pyarrow  # noqa: F401
 

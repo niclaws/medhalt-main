@@ -1,0 +1,8 @@
+# Use in a separate environment for the larger models if legacy Transformers is incompatible.
+# Install the cluster's CUDA-compatible torch build FIRST, then the original requirements.txt.
+# MedGemma requires transformers >=4.50; this adapter targets 4.56/4.57 APIs.
+transformers>=4.56,<5
+accelerate>=0.34,<2
+safetensors>=0.4
+bitsandbytes>=0.45.5,<1
+-r requirements-extra.txt

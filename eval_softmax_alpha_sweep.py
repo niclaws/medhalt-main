@@ -1,3 +1,11 @@
+"""Measure intervention behavior across softmax gate and alpha settings.
+
+The sweep evaluates Med-HALT and downstream datasets under a grid of alpha
+caps. Each cap is combined with the gate probability to produce an effective
+residual-steering strength, and per-condition predictions and summaries are
+written so safety and accuracy trade-offs can be compared consistently.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -77,6 +85,7 @@ def evaluate_medhalt_caps(
     batch_size: int,
     run_types: list[str],
 ) -> pd.DataFrame:
+    """Evaluate Med-HALT examples across the configured intervention-strength caps."""
     active = bool(selection["selected"])
     selected_alpha = float(selection["alpha"]) if active else 0.0
     steerer = (
@@ -146,6 +155,7 @@ def evaluate_downstream_caps(
     caps: list[float],
     batch_size: int,
 ):
+    """Evaluate downstream QA examples across the configured intervention-strength caps."""
     active = bool(selection["selected"])
     selected_alpha = float(selection["alpha"]) if active else 0.0
     steerer = (
@@ -298,6 +308,7 @@ def write_one_condition(
 
 
 def main():
+    """Parse command-line options and run this script’s configured workflow."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )

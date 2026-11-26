@@ -1,3 +1,11 @@
+"""Select and evaluate residual layers under explicit safety constraints.
+
+The analysis builds task steering vectors, measures layer-wise effects, and
+chooses configurations that improve target behavior while limiting induced
+errors on guard examples. It also fits risk gates, evaluates cross-task
+protocols, and produces paired outcome tables and plots for answer generation.
+"""
+
 from __future__ import annotations
 
 import math
@@ -57,6 +65,7 @@ def mcnemar_exact(b: int, c: int) -> float:
 
 
 def auroc(score: np.ndarray, label: np.ndarray) -> float:
+    """Measure how well risk scores rank positive examples above negative examples."""
     score = np.asarray(score, dtype=float)
     label = np.asarray(label, dtype=bool)
     npos, nneg = label.sum(), (~label).sum()
@@ -67,6 +76,7 @@ def auroc(score: np.ndarray, label: np.ndarray) -> float:
 
 
 def _spearman(a, b) -> float:
+    """Measure whether two arrays have a monotonic rank relationship."""
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
     m = np.isfinite(a) & np.isfinite(b)
@@ -110,6 +120,7 @@ def build_layer_vectors(
     alias = {t: t for t in hallu}
 
     def add_combo(name, members):
+        """Add an averaged steering vector for the requested source-task combination, reusing an existing equivalent combination when possible."""
         members = tuple(sorted(members))
         if not members:
             return
@@ -190,6 +201,7 @@ def build_layer_vectors(
 
 
 def _gold_margin(logits: np.ndarray, gold: int) -> np.ndarray:
+    """Measure how much higher the gold answer score is than the strongest competing answer."""
     logits = np.atleast_2d(logits)
     other = np.delete(logits, gold, axis=1).max(axis=1)
     return logits[:, gold] - other
@@ -376,6 +388,7 @@ def select_safe_layer(
     criterion: str = "worst",
     split: str = "validation",
 ) -> Dict:
+    """Choose the layer, vector, and strength that meet the configured safety constraint."""
     agg = _per_config(tab, vec, tasks, split, pair_types)
     key = "worst_S" if criterion == "worst" else "mean_S"
     res = {
@@ -554,6 +567,7 @@ def run_features(pairs: List[Dict], base: List[Dict], task: str, split: str):
 def fit_gate_router(
     feats: Dict[str, Dict], run_ids: Sequence[str], num_layers: int, mode: str
 ) -> RiskRouter:
+    """Train the risk router used to decide when steering should activate."""
     wrong = np.array([not feats[r]["correct"] for r in run_ids])
     return RiskRouter(default_router_layers(num_layers), mode=mode).fit(
         [feats[r]["feat"] for r in run_ids], wrong
@@ -561,6 +575,7 @@ def fit_gate_router(
 
 
 def predict_risk(router: RiskRouter, feats, run_ids) -> np.ndarray:
+    """Predict risk for each example using the fitted router."""
     return router.predict([feats[r]["feat"] for r in run_ids])
 
 
@@ -615,6 +630,7 @@ def evaluate_protocols(
     vec_names = set(eff_idx.index.get_level_values(0))
 
     def outcomes(vec, layer, alpha, run_ids):
+        """Select cached intervention outcomes for the requested vector, layer, strength, and sample IDs."""
         sub = eff_idx.loc[(vec, layer, np.float32(alpha))]
         return sub[sub.run_id.isin(run_ids)].set_index("run_id").reindex(run_ids)
 
@@ -1146,6 +1162,7 @@ def generation_tables(
 def make_safe_layer_plots(
     out_dir, tab, rankings, selections, outcomes, controls, eps, lam, feats_risk=None
 ):
+    """Save plots that show selected layers, intervention effects, and safety results."""
     import matplotlib
 
     matplotlib.use("Agg")

@@ -1,3 +1,11 @@
+"""Convert model prediction files into the project's evaluation reports.
+
+The helpers normalize legacy prediction text into structured JSON, map file
+names to Med-HALT task identifiers, and delegate scoring to ``FullDataEval``.
+Running this module directly processes the prediction and dataset folders
+specified by its command-line or in-file configuration.
+"""
+
 import pandas as pd
 from medhalt.eval.eval_full import FullDataEval
 import glob, os, json
@@ -17,6 +25,7 @@ ds_name_dict = {v: k for k, v in pred_prefix_dict.items()}
 
 
 def escaped_(data: str):
+    """Escape quotes inside model output so the text can be parsed safely."""
     if "'" in data:
         escaped_str = re.sub(r"(?<=\w)(')(?=\w)", r"\"", data)
     else:
@@ -28,17 +37,20 @@ def escaped_(data: str):
 
 def parse_key_values(out_str):
     # regex = r"""['"]{key}['"]\s*:\s*['"]*(.*?)['"]*\s*[,}}]""".format(key=key)
+    """Find key-value pairs in a model output string using the expected output syntax."""
     regex = r"""['"](.*?)['"]\s*:\s*['"]*(.*?)['"]*\s*[,}]"""
     regex = re.compile(regex)
     return regex.findall(out_str)
 
 
 def recreate(out_str):
+    """Recover a dictionary from loosely formatted legacy model output."""
     kvs = parse_key_values(out_str)
     return {kv[0].replace("\\", ""): kv[1] for kv in kvs}
 
 
 def clean_output(id, out_str):
+    """Remove extra formatting and parse one prediction into a Python data structure."""
     try:
         if np.isnan(out_str):
             import pdb
@@ -64,7 +76,7 @@ def clean_output(id, out_str):
 
 
 def convert_to_json(prediction_folder, dataset_folder):
-
+    """Parse prediction files and write normalized JSON records for the evaluation classes."""
     pred_files = glob.glob(os.path.join(prediction_folder, "*.csv"))
     for pred_file in pred_files:
         if os.path.basename(pred_file) == "results.csv":

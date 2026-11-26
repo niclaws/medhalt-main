@@ -1,3 +1,11 @@
+"""Run softmax-gated evaluation on the Med-HALT benchmark tasks.
+
+The script loads saved task splits and selected safe-layer settings, rebuilds
+the discovery steering vector and router, and scores clean/corrupt task pairs.
+For each example, a calibrated softmax gate controls the strength of the
+residual intervention before metrics and prediction files are written.
+"""
+
 from __future__ import annotations
 import argparse
 import gc
@@ -27,6 +35,7 @@ from softmax_eval_helpers import (
 def run_evaluation(
     engine, examples, cfg, vector, router, gate_cfg, batch_size, run_types
 ):
+    """Run the configured evaluation over the selected Med-HALT examples."""
     steerer = (
         ProbabilisticResidualSteerer(
             engine, vector, int(cfg["layer"]), float(cfg["alpha"]), batch_size
@@ -107,6 +116,7 @@ def run_evaluation(
 
 
 def main():
+    """Parse command-line options and run this script’s configured workflow."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
