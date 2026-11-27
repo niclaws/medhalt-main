@@ -168,7 +168,7 @@ class CausalEngine:
             "float32": torch.float32,
         }[dtype]
         if device is None:
-            device = "auto"
+            device = "cuda"
         self.device = torch.device(device)
         import transformers
         from packaging import version

@@ -33,7 +33,7 @@ def nf4_load_kwargs(dtype, max_memory=None, allow_cpu_offload=False):
     """Explicit logical CUDA device 0; never silently spill to CPU or disk."""
     if allow_cpu_offload or max_memory is not None:
         raise ValueError(
-            'NF4 single-GPU mode uses device_map="auto"; omit --max-memory and --allow-cpu-offload.'
+            'NF4 single-GPU mode uses device_map="cuda"; omit --max-memory and --allow-cpu-offload.'
         )
     if dtype not in (torch.bfloat16, torch.float16):
         raise ValueError("NF4 compute dtype must be bfloat16 or float16")
@@ -53,7 +53,7 @@ def nf4_load_kwargs(dtype, max_memory=None, allow_cpu_offload=False):
             "Install rebuttal/requirements-large.txt in a CUDA-compatible environment."
         ) from e
     return dict(
-        device_map="auto",
+        device_map="cuda",
         quantization_config=BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -122,7 +122,7 @@ class ShardedEngine(CausalEngine):
         args = dict(
             **kw,
             torch_dtype=self.dtype,
-            device_map="auto",
+            device_map="cuda",
             low_cpu_mem_usage=True,
         )
         if max_memory:

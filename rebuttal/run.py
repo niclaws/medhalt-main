@@ -390,7 +390,7 @@ def run_small(tag, args, root, samples):
             head_dim=engine.head_dim,
             hidden_size=engine.hidden_size,
             dtype=str(engine.dtype),
-            device_map="auto",
+            device_map="cuda",
             model_commit=getattr(engine.model.config, "_commit_hash", None),
             tokenizer_class=type(engine.tokenizer).__name__,
             engine=type(engine).__name__,
@@ -599,7 +599,7 @@ def run_large(tag, args, root):
         dict(
             model_name=engine.model_name,
             model_commit=getattr(engine.model.config, "_commit_hash", None),
-            device_map="auto",
+            device_map="cuda",
             layers=engine.num_layers,
             heads=engine.num_heads,
             head_dim=engine.head_dim,

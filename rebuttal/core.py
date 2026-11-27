@@ -192,9 +192,7 @@ class Store:
                         print(f"OLD: {old}")
                         print(f"NEW: {new}")
 
-                raise ValueError(
-                    f"Config changed: {f}; use a new output directory"
-                )
+                raise ValueError(f"Config changed: {f}; use a new output directory")
         else:
             write_json(f, self.config)
 

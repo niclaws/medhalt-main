@@ -89,7 +89,7 @@ def _run(a):
         num_layers=e.num_layers,
         num_heads=e.num_heads,
         head_dim=e.head_dim,
-        device_map="auto",
+        device_map="cuda",
         environment=versions(),
         quantization=getattr(e, "quantization_metadata", {"mode": "none"}),
         peak_vram_bytes=torch.cuda.max_memory_allocated(0),

@@ -44,7 +44,7 @@ class Model:
                 revision=revision,
                 torch_dtype=torch.float16,
                 load_in_8bit=load_in_8bit,
-                device_map="auto",
+                device_map="cuda",
                 trust_remote_code=True,
             )
 
