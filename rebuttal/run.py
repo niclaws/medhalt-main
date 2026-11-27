@@ -190,7 +190,10 @@ def _run(args, root, p):
     args.alphas=sorted(set(args.alphas)); args.rhos=sorted(set(args.rhos)); args.gate_caps=sorted(set(args.gate_caps)); args.data_dir=str(Path(args.data_dir).resolve()); args.results_dir=str(Path(args.results_dir).resolve())
     if args.plan:
         for tag in args.models:
-            for seed in args.seeds: print(f'{tag} seed={seed} experiments={args.experiments} input={Path(args.results_dir)/f"{tag}_seed{seed}" if tag not in LARGE_MODELS and set(args.experiments)!={'scale'} else "fresh"} output={root/f"{tag}_seed{seed}"}')
+            for seed in args.seeds:
+                is_fresh = tag in LARGE_MODELS or set(args.experiments) == {"scale"}
+                in_path = "fresh" if is_fresh else Path(args.results_dir) / f"{tag}_seed{seed}"
+                print(f"{tag} seed={seed} experiments={args.experiments} input={in_path} output={root / f'{tag}_seed{seed}'}")
         return 0
     LOG.info('Arguments %s',vars(args)); samples=load_external(args,root) if 'attenuation' in args.experiments or ('treatment' in args.experiments and args.treatment_external) else {}; failures=[]
     for tag in args.models:
