@@ -136,13 +136,13 @@ def _load_checkpoint(
 
     pairs = torch.load(
         pairs_file,
-        map_location="auto",
+        map_location="cpu",
         weights_only=False,
     )["pairs"]
 
     base = torch.load(
         base_file,
-        map_location="auto",
+        map_location="cpu",
         weights_only=False,
     )
 

@@ -59,7 +59,7 @@ def stable_seed(*parts):
 @timed
 def load_pt(path):
     # Only use trusted, locally generated original experiment checkpoints.
-    return torch.load(path, map_location="auto", weights_only=False)
+    return torch.load(path, map_location="cpu", weights_only=False)
 
 
 def wilson(k, n, z=1.6448536269514722):

@@ -35,9 +35,9 @@ def checkpoint_split(run_dir: Path, task: str, split: str) -> list[tuple[dict, d
                 f"Missing original checkpoint {path}; archived results CSVs alone cannot rerun interventions"
             )
     # Deliberately matches the ORIGINAL loader. Only load your own trusted .pt files.
-    pairs_obj = torch.load(pairs_path, map_location="auto", weights_only=False)
+    pairs_obj = torch.load(pairs_path, map_location="cpu", weights_only=False)
     pairs = pairs_obj["pairs"] if isinstance(pairs_obj, dict) else pairs_obj
-    base = torch.load(base_path, map_location="auto", weights_only=False)
+    base = torch.load(base_path, map_location="cpu", weights_only=False)
     if len(pairs) != len(base):
         raise ValueError(f"Pairs and base rows are mismatched for {task}")
     by_id = {str(pair["sample_id"]): i for i, pair in enumerate(pairs)}
