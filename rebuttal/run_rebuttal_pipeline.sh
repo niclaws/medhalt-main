@@ -24,6 +24,7 @@ for stage in audit format attenuation strength treatment probe; do
 
     bash rebuttal/run_rebuttal_individual.sh "$stage" \
         --splits test \
+        --attn-implementation sdpa \
         --quantization none \
         --fail-fast
 
@@ -44,6 +45,7 @@ done
 #    --large-max-pairs 800 \
 #    --large-discovery-limit 100 \
 #    --splits test \
+#     --attn-implementation sdpa \
 #    --fail-fast
 
 echo "All experiments completed at $(date)"
