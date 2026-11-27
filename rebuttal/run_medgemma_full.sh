@@ -11,7 +11,7 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export MPLBACKEND=Agg
 mkdir -p "$OUT_ROOT"
 # Stage arguments are optional: for example bash run_medgemma_full.sh --experiments strength treatment probe
-python -u rebuttal/medgemma_rebuttal.py \
+python -u -m rebuttal.medgemma_rebuttal \
   --models medgemma_27b --seeds 0 \
   --quantization nf4 --dtype bfloat16 --attn-implementation sdpa \
   --large-mode layer --large-all-layers \
