@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from rebuttal import run as runner
+import rebuttal.run as runner
 from rebuttal.core import (
     LOG,
     TASKS,
