@@ -41,13 +41,23 @@ def residual(engine, state, layer, vectors, specs, batch_size):
 
 @timed
 def random_vector(v, seed):
-    g = torch.Generator(device="cuda").manual_seed(seed)
-    x = torch.randn(v.shape, generator=g, dtype=torch.float32)
-    # Match per-layer L2 norm, including zero-norm source vectors.
-    return x * (
-        v.float().norm(dim=-1, keepdim=True)
-        / x.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    v_cpu = v.detach().to(device="cpu", dtype=torch.float32)
+
+    g = torch.Generator(device="cpu")
+    g.manual_seed(seed)
+
+    x = torch.randn(
+        v_cpu.shape,
+        generator=g,
+        dtype=torch.float32,
+        device="cpu",
     )
+
+    # Match per-layer L2 norm.
+    v_norm = v_cpu.norm(dim=-1, keepdim=True)
+    x_norm = x.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+
+    return (x * (v_norm / x_norm)).to(v.device)
 
 
 @timed
