@@ -181,7 +181,20 @@ class Store:
             if not resume:
                 raise FileExistsError(f"{f}: use --resume or a new output directory")
             if json.loads(f.read_text()) != self.config:
-                raise ValueError(f"Config changed: {f}; use a new output directory")
+                old_config = json.loads(f.read_text())
+
+                for key in sorted(set(old_config) | set(self.config)):
+                    old = old_config.get(key)
+                    new = self.config.get(key)
+
+                    if old != new:
+                        print(f"\nCONFIG MISMATCH: {key}")
+                        print(f"OLD: {old}")
+                        print(f"NEW: {new}")
+
+                raise ValueError(
+                    f"Config changed: {f}; use a new output directory"
+                )
         else:
             write_json(f, self.config)
 
